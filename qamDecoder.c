@@ -1,3 +1,4 @@
+#include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -9,29 +10,6 @@
 
 int main(int argc, char** args)
 {
-
-    // process arguments
-    //  none right now
-
-    char buffer[1000];
-    int stringLength = 0;
-    // for live plotting, pipe to feedgnuplot
-    FILE* waveformPlotStdin = popen("feedgnuplot --domain --lines --points --title \"Time Domain\" --unset key --unset grid", "w");    // using it to plot the time domain signal
-    FILE* errorPlotStdin = popen("feedgnuplot --domain --lines --points --title \"Time Domain error signal\" --unset key --unset grid", "w");    // using it to plot the time domain signal
-    //FILE* IQplotStdin = popen("feedgnuplot --domain --points --title \"IQ plot\" --unset key", "w");
-    FILE* IQplotStdin = popen("feedgnuplot --dataid --domain --points --title \"IQ plot\" --unset key", "w");
-
-    // for ploting IQ values over time to hopefully obtain an error function
-    stringLength = 0;
-    stringLength += sprintf(buffer + stringLength, "feedgnuplot ");
-    stringLength += sprintf(buffer + stringLength, "--domain --lines --points --unset grid ");
-    stringLength += sprintf(buffer + stringLength, "--title \"IQ values over time\" ");
-    stringLength += sprintf(buffer + stringLength, "--legend 0 \"IQreal\" --legend 1 \"IQimag\" ");
-    stringLength += sprintf(buffer + stringLength, "--legend 2 \"IQlastReal\" --legend 3 \"IQlastImag\" ");
-    stringLength += sprintf(buffer + stringLength, "--legend 4 \"IQmidReal\" --legend 5 \"IQmidImag\" ");
-    FILE* IQvstimeStdin = popen(buffer, "w");    // using it to plot the time domain signal
-     
-
     typedef struct {
         union {
             int32_t value;
@@ -46,19 +24,62 @@ int main(int argc, char** args)
         sampleBuffer[i] = 0;
     }
     int windowPhase = 0;    // the offset of sample buffer or fftwindow in time, to get symbol time sync
-    double windowPhaseReal = 0; // the floating point window phase, to be quantized into windowPhase
+    double windowPhaseReal = (double)rand() / RAND_MAX * symbolPeriod; // the floating point window phase, to be quantized into windowPhase
+    //double windowPhaseReal = 0;
 
     int tookSampleAt = 0;
+
+
+    // process arguments
+    //  none right now
+
+    char buffer[10000];
+    int stringLength = 0;
+    // for live plotting, pipe to feedgnuplot
+    stringLength = 0;
+    stringLength += sprintf(buffer + stringLength,"feedgnuplot ");
+    stringLength += sprintf(buffer + stringLength,"--domain --lines --points ");
+    stringLength += sprintf(buffer + stringLength,"--title \"Raw signal Time domain\" ");
+    stringLength += sprintf(buffer + stringLength,"--xlabel \"Time (microphone sample #\" --ylabel \"value\" ");
+    FILE* waveformPlotStdin = popen("feedgnuplot --domain --lines --points --title \"Time Domain\" --unset key --unset grid", "w");    // using it to plot the time domain signal
+    stringLength = 0;
+    stringLength += sprintf(buffer + stringLength,"feedgnuplot ");
+    stringLength += sprintf(buffer + stringLength,"--domain --lines --points ");
+    stringLength += sprintf(buffer + stringLength,"--title \"Time Domain error signal\" ");
+    stringLength += sprintf(buffer + stringLength,"--legend 0 \"estimated phase offset\" ");
+    stringLength += sprintf(buffer + stringLength,"--legend 1 \"rolling average error signal\" ");
+    stringLength += sprintf(buffer + stringLength,"--legend 2 \"PI filtered signal\" ");
+    stringLength += sprintf(buffer + stringLength,"--legend 3 \"fft window phase shift\" ");
+    stringLength += sprintf(buffer + stringLength,"--legend 4 \"real target phase offset\" ");
+    FILE* errorPlotStdin = popen(buffer, "w");    // using it to plot the time domain signal
+    //FILE* IQplotStdin = popen("feedgnuplot --domain --points --title \"IQ plot\" --unset key", "w");
+    stringLength = 0;
+    stringLength += sprintf(buffer + stringLength,"feedgnuplot ");
+    stringLength += sprintf(buffer + stringLength,"--dataid --domain --points ");
+    stringLength += sprintf(buffer + stringLength,"--title \"IQ plot\" ");
+    stringLength += sprintf(buffer + stringLength,"--xlabel \"I\" --ylabel \"Q\" ");
+    for(int i = 0; i < symbolPeriod; i++)
+        stringLength += sprintf(buffer + stringLength,"--legend %i \"Phase offset %i samples\" ", i, i);
+    FILE* IQplotStdin = popen(buffer, "w");
+
+    // for ploting IQ values over time to hopefully obtain an error function
+    stringLength = 0;
+    stringLength += sprintf(buffer + stringLength, "feedgnuplot ");
+    stringLength += sprintf(buffer + stringLength, "--domain --lines --points --unset grid ");
+    stringLength += sprintf(buffer + stringLength, "--title \"IQ vs time Eye Diagram\" ");
+    stringLength += sprintf(buffer + stringLength, "--xlabel \"Time (IQsample #)\" --ylabel \"value\" ");
+    stringLength += sprintf(buffer + stringLength, "--legend 0 \"I\" --legend 1 \"Q\" ");
+    stringLength += sprintf(buffer + stringLength, "--legend 2 \"IQlastReal\" --legend 3 \"IQlastImag\" ");
+    stringLength += sprintf(buffer + stringLength, "--legend 4 \"IQmidReal\" --legend 5 \"IQmidImag\" ");
+    FILE* IQvstimeStdin = popen(buffer, "w");    // using it to plot the time domain signal
+     
+
 
     // while there is data to recieve, not end of file
     for(int n = 0;n < symbolPeriod * 2000;n++)
     {
         // recieve data on stdin, two signed 32bit integers
 
-        //windowPhase = ((n + symbolPeriod/2) / symbolPeriod / (1000/symbolPeriod)) % symbolPeriod;    // change the window phase
-        //windowPhase = 0;
-        windowPhase = (int)round(windowPhaseReal) % symbolPeriod; // quantize the real window phase
-        windowPhase = windowPhase < 0 ? symbolPeriod + windowPhase : windowPhase;
         int bufferIndex = (n + windowPhase)%symbolPeriod;   // use the windowphase to adjust the buffer index position
         for(int i = 0; i < sizeof(sample.value); i++)
         {
@@ -109,11 +130,20 @@ int main(int argc, char** args)
             //double error = (pow(IQ, 2) - pow(IQlast, 2)) * pow(IQmidpoint, 2);
             double phaseOffsetEstimate = creal((IQ - IQlast) * conj(IQmidpoint));
             // PI control filter
-            double error = 0 - phaseOffsetEstimate;
+            static double rollingAverage = 0;
+            float weight = 0.1;
+            rollingAverage = rollingAverage * (1 - weight) + phaseOffsetEstimate * weight;
+            double error = 0 - rollingAverage;
             static double errorIntegral = 0;
             errorIntegral += error;
-            double phaseAdjustment = (errorIntegral * 0.3 + error * 1.5);
+            double phaseAdjustment = (errorIntegral * 0.0 + error * 8) * 1;
             windowPhaseReal += phaseAdjustment;
+            //windowPhaseReal = fmod(windowPhaseReal + phaseAdjustment, symbolPeriod);
+            //windowPhaseReal = windowPhaseReal < 0 ? symbolPeriod + windowPhaseReal : windowPhaseReal;
+            //windowPhase = (int)round(windowPhaseReal) % symbolPeriod;
+            windowPhase = (int)round(windowPhaseReal) % symbolPeriod; // quantize the real window phase
+            windowPhase = windowPhase < 0 ? symbolPeriod + windowPhase : windowPhase;
+            //windowPhase = n * 2 / 2000;
             //windowPhase = (int)((windowPhase + phaseAdjustment) < 0 ? (symbolPeriod - windowPhase + phaseAdjustment) : (windowPhase + phaseAdjustment)) % symbolPeriod;
 
             // extract the frequencies to be decoded
@@ -124,7 +154,7 @@ int main(int argc, char** args)
             // plot with a new color for each window phase
             fprintf(IQplotStdin, "%f %i %f\n", creal(IQ), windowPhase, cimag(IQ));
             //fprintf(IQplotStdin, "%f %i %f\n", creal(IQmidpoint), windowPhase + symbolPeriod, cimag(IQmidpoint));
-            fprintf(errorPlotStdin, "%i, %f %f %f %f\n", n / symbolPeriod, error, phaseAdjustment, (double)windowPhase / symbolPeriod, windowPhaseReal / symbolPeriod);
+            fprintf(errorPlotStdin, "%i, %f %f %f %f %f\n", n / symbolPeriod, phaseOffsetEstimate, error, phaseAdjustment, (double)windowPhase / symbolPeriod, windowPhaseReal / symbolPeriod);
             //fprintf(IQvstimeStdin, "%i, %f, %f, %f, %f, %f, %f\n", n / symbolPeriod % (2*3), creal(IQ), cimag(IQ), creal(IQlast), cimag(IQlast), creal(IQmidpoint), cimag(IQmidpoint));
             fprintf(IQvstimeStdin, "%f, %f, %f\n", (n / symbolPeriod) % (2*3) + 0., creal(IQ), cimag(IQ));
             fprintf(IQvstimeStdin, "%f, %f, %f\n", (n / symbolPeriod) % (2*3) + 0.5, creal(IQmidpoint), cimag(IQmidpoint));

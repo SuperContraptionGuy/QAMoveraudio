@@ -26,10 +26,16 @@ double simpleQAM(int n, double t)
     // determine the I and Q
     //double I = (double)(count % square) / (square - 1) * 2 - 1;
     //double Q = (double)(count / square) / (square - 1) * 2 - 1;
-    double I = count % 2 * 2 - 1;
+    //double I = count % 2 * 2 - 1;
     //double Q = (count + 1) % 2;
-    double Q = 0;
+    //double Q = 0;
 
+    static double I = 0;
+    double Q = 0;
+    if(n % symbolPeriod == 0)
+    {
+        I = (double)(rand() % 2) * 2 - 1;
+    }
 
     // variables to enable transition IQ values
     static double decayStartTime = 0;
@@ -59,7 +65,10 @@ double simpleQAM(int n, double t)
 
     double totalAmplitude = 0.01;
     //double totalAmplitude = 1;
-    return (I * cos(2*M_PI*n/symbolPeriod) + Q * sin(2*M_PI*n/symbolPeriod))/2*sqrt(2) * totalAmplitude;
+    double randomness = 0;
+    double randI = ((double)rand() / RAND_MAX * 2 - 1) * randomness;
+    double randQ = ((double)rand() / RAND_MAX * 2 - 1) * randomness;
+    return ((I + randI) * cos(2*M_PI*n/symbolPeriod) + (Q + randQ) * sin(2*M_PI*n/symbolPeriod))/2*sqrt(2) * totalAmplitude;
     //return (I * sin(2*M_PI*t*600) + Q * cos(2*M_PI*t*600))/2*sqrt(2);
     //return (I * sin(2*M_PI*t*6000) + Q * cos(2*M_PI*t*6000))/2*sqrt(2);
 }
