@@ -16,7 +16,8 @@ int main(int argc, char** args)
             uint8_t byte[sizeof(int32_t)];
         };
     } sample_32;
-    const int symbolPeriod = 32;       // length of each symbol in samples, and so the fft window. This is the period of time all the orthogonal symbols will be integrated over
+    const int symbolPeriod = 64;       // length of each symbol in samples, and so the fft window. This is the period of time all the orthogonal symbols will be integrated over
+    int k = 4;  // the OFDM channel number, how many cycles per symbol
     sample_32 sample;
     double sampleBuffer[symbolPeriod];  // buffer is the length of the symbol period, so that symbols are orthogonal
     for(int i = 0; i < symbolPeriod; i++)
@@ -24,8 +25,8 @@ int main(int argc, char** args)
         sampleBuffer[i] = 0;
     }
     int windowPhase = 0;    // the offset of sample buffer or fftwindow in time, to get symbol time sync
-    double windowPhaseReal = (double)rand() / RAND_MAX * symbolPeriod; // the floating point window phase, to be quantized into windowPhase
-    //double windowPhaseReal = 0;
+    //double windowPhaseReal = (double)rand() / RAND_MAX * symbolPeriod; // the floating point window phase, to be quantized into windowPhase
+    double windowPhaseReal = 0;
 
     int tookSampleAt = 0;
 
@@ -41,7 +42,9 @@ int main(int argc, char** args)
     stringLength += sprintf(buffer + stringLength,"--domain --lines --points ");
     stringLength += sprintf(buffer + stringLength,"--title \"Raw signal Time domain\" ");
     stringLength += sprintf(buffer + stringLength,"--xlabel \"Time (microphone sample #\" --ylabel \"value\" ");
-    FILE* waveformPlotStdin = popen("feedgnuplot --domain --lines --points --title \"Time Domain\" --unset key --unset grid", "w");    // using it to plot the time domain signal
+    stringLength += sprintf(buffer + stringLength,"--legend 0 \"Signal\" ");
+    stringLength += sprintf(buffer + stringLength,"--legend 1 \"equalization factor\" ");
+    FILE* waveformPlotStdin = popen(buffer, "w");    // using it to plot the time domain signal
     stringLength = 0;
     stringLength += sprintf(buffer + stringLength,"feedgnuplot ");
     stringLength += sprintf(buffer + stringLength,"--domain --lines --points ");
@@ -55,7 +58,7 @@ int main(int argc, char** args)
     //FILE* IQplotStdin = popen("feedgnuplot --domain --points --title \"IQ plot\" --unset key", "w");
     stringLength = 0;
     stringLength += sprintf(buffer + stringLength,"feedgnuplot ");
-    stringLength += sprintf(buffer + stringLength,"--dataid --domain --points ");
+    stringLength += sprintf(buffer + stringLength,"--dataid --domain --points --maxcurves %i ", symbolPeriod * 2 + 1);
     stringLength += sprintf(buffer + stringLength,"--title \"IQ plot\" ");
     stringLength += sprintf(buffer + stringLength,"--xlabel \"I\" --ylabel \"Q\" ");
     for(int i = 0; i < symbolPeriod; i++)
@@ -87,8 +90,9 @@ int main(int argc, char** args)
             sample.byte[i] = getchar();
         }
         // convert to a double ranged from -1 to 1
-        sampleBuffer[bufferIndex] = (double)sample.value / INT32_MAX;
-        fprintf(waveformPlotStdin, "%i %f\n", n, sampleBuffer[bufferIndex]);
+        static double equalizationFactor = 1;
+        sampleBuffer[bufferIndex] = (double)sample.value / INT32_MAX * equalizationFactor;
+        fprintf(waveformPlotStdin, "%i %f %f\n", n, sampleBuffer[bufferIndex], equalizationFactor);
 
         // if we are half full on the buffer, take an intermidiate IQ sample, for timing sync later
         static double complex IQmidpoint = 0;
@@ -99,16 +103,19 @@ int main(int argc, char** args)
             for(int i = 0; i < symbolPeriod; i++)
             {
                 // phasor offsets the cos and sin waves so that they allign with the time sequence of data in the half overwritten buffer
-                double phase = (double)((i + bufferIndex + 1)%symbolPeriod) / symbolPeriod;
-                IQmidpoint += sampleBuffer[i] * cos(2*M_PI*phase) + I * sampleBuffer[i] * sin(2*M_PI*phase);
+                double phase = (double)((i + bufferIndex + 1)%symbolPeriod) * k / symbolPeriod;
+                //IQmidpoint += sampleBuffer[i] * cos(2*M_PI*phase) + I * sampleBuffer[i] * sin(2*M_PI*phase);
+                IQmidpoint += sampleBuffer[i] * cexp(I*2*M_PI*phase);
             }
             // normalization factor
-            IQmidpoint *= sqrt(1. / symbolPeriod);
+            IQmidpoint *= sqrt(1. / symbolPeriod) / k;
             //printf("midpoint IQ: %f + %fi\n", creal(IQmidpoint), cimag(IQmidpoint));
         }
         // if the window buffer is filled, ie, we're on the last index of the buffer
+        // I added another condition to help debounce. sometimes it takes many samples in a row due to changing window offset
         static double complex IQ = 0;
         static double complex IQlast = 0;
+        double RMS = 0;
         if(bufferIndex == symbolPeriod - 1 & n - tookSampleAt > symbolPeriod / 2)
         {
             tookSampleAt = n;
@@ -119,31 +126,72 @@ int main(int argc, char** args)
             for(int i = 0; i < symbolPeriod; i++)
             {
                 // use a summation over the symbol period to separate orthogonal components (quadrature components) at the single frequency
-                double phase = (double)i/symbolPeriod;  // one cycle per symbol period
-                IQ += sampleBuffer[i] * cos(2*M_PI*phase) + I * sampleBuffer[i] * sin(2*M_PI*phase);
+                double phase = (double)i * k /symbolPeriod;  // one cycle per symbol period
+                //double phase = (double)((i + bufferIndex + 1)%symbolPeriod) * k / symbolPeriod;
+                //IQ += sampleBuffer[i] * cos(2*M_PI*phase) + I * sampleBuffer[i] * sin(2*M_PI*phase);
+                IQ += sampleBuffer[i] * cexp(I*2*M_PI*phase);
+
+                // compute RMS amplitude for equalization
+                RMS += pow(sampleBuffer[i], 2);
             }
             // normalization with a unitary normalization factor
-            IQ *= sqrt(1. / symbolPeriod);
+            IQ *= sqrt(1. / symbolPeriod) / k;
+            // complete the RMS fomula
+            RMS = sqrt(1./symbolPeriod * RMS);
+            
+            // averaging filter for the equalizer
+            static double rmsaverageWindow[5] = {0};
+            int rmsaverageSize = 5;
+            int rmsaverageIndex = (n / symbolPeriod) % rmsaverageSize;
+            rmsaverageWindow[rmsaverageIndex] = 1./sqrt(2) - RMS;
+            double rmsaverage = 0;
+            for(int i = 0; i < rmsaverageSize; i++)
+                rmsaverage += rmsaverageWindow[i];
+            rmsaverage /= rmsaverageSize;
+            //equalizationFactor += (1. / sqrt(2) - RMS) * 5.;
+
+            // PID for the equalizer, just proportional. with max
+            equalizationFactor = fmax(fmin(equalizationFactor + rmsaverage * 2, 1000), 0);
+
 
             // try to get a phase lock, symbol time lock, frequency lock, and equalization
             // calculate the error signal
-            //double error = (pow(IQ, 2) - pow(IQlast, 2)) * pow(IQmidpoint, 2);
-            double phaseOffsetEstimate = creal((IQ - IQlast) * conj(IQmidpoint));
-            // PI control filter
-            static double rollingAverage = 0;
-            float weight = 0.1;
-            rollingAverage = rollingAverage * (1 - weight) + phaseOffsetEstimate * weight;
-            double error = 0 - rollingAverage;
+            // Gardner Algorithm: Real Part( derivitive of IQ times conjugate of IQ)
+            // basically, it's trying to estimate the error of zero crossings
+            double phaseOffsetEstimate = -creal((IQ - IQlast) * conj(IQmidpoint));
+
+            // Process Variable (PV, ie phase estimate) filter
+            // rolling average of phase offset estimate
+            static double averageWindow[40] = {0};
+            int averageSize = 40;
+            int averageIndex = (n / symbolPeriod) % averageSize;
+            averageWindow[averageIndex] = phaseOffsetEstimate;
+            double average = 0;
+            for(int i = 0; i < averageSize; i++)
+                average += averageWindow[i];
+            average /= averageSize;
+
+            // PID loop
+            double error = 0 - average;
             static double errorIntegral = 0;
             errorIntegral += error;
-            double phaseAdjustment = (errorIntegral * 0.0 + error * 8) * 1;
+            static double lastError = 0;
+            double errorDerivative = error - lastError;
+            lastError = error;
+            //double phaseAdjustment = (errorDerivative * -1.0 + errorIntegral * 0.0 + error * 6.0) * 1;
+            //double phaseAdjustment = (errorDerivative * 0.0 + errorIntegral * 0.00 + error * 0.1) * 1;
+            double phaseAdjustment = (errorDerivative * 0.0 + errorIntegral * 0.000 + error * 0.8) * 1;
+
             windowPhaseReal += phaseAdjustment;
             //windowPhaseReal = fmod(windowPhaseReal + phaseAdjustment, symbolPeriod);
             //windowPhaseReal = windowPhaseReal < 0 ? symbolPeriod + windowPhaseReal : windowPhaseReal;
             //windowPhase = (int)round(windowPhaseReal) % symbolPeriod;
             windowPhase = (int)round(windowPhaseReal) % symbolPeriod; // quantize the real window phase
             windowPhase = windowPhase < 0 ? symbolPeriod + windowPhase : windowPhase;
-            //windowPhase = n * 2 / 2000;
+            //windowPhase = (n * 2 / 2000) % symbolPeriod;
+            //windowPhase = (n * 4 * 2/ (symbolPeriod * 2000) ) % 4 * symbolPeriod / 4;
+            //windowPhase = symbolPeriod / 4;
+            //windowPhase = 0;
             //windowPhase = (int)((windowPhase + phaseAdjustment) < 0 ? (symbolPeriod - windowPhase + phaseAdjustment) : (windowPhase + phaseAdjustment)) % symbolPeriod;
 
             // extract the frequencies to be decoded
@@ -154,7 +202,7 @@ int main(int argc, char** args)
             // plot with a new color for each window phase
             fprintf(IQplotStdin, "%f %i %f\n", creal(IQ), windowPhase, cimag(IQ));
             //fprintf(IQplotStdin, "%f %i %f\n", creal(IQmidpoint), windowPhase + symbolPeriod, cimag(IQmidpoint));
-            fprintf(errorPlotStdin, "%i, %f %f %f %f %f\n", n / symbolPeriod, phaseOffsetEstimate, error, phaseAdjustment, (double)windowPhase / symbolPeriod, windowPhaseReal / symbolPeriod);
+            fprintf(errorPlotStdin, "%i, %f %f %f %f %f\n", n / symbolPeriod, -phaseOffsetEstimate, error, phaseAdjustment, (double)windowPhase / symbolPeriod, windowPhaseReal / symbolPeriod);
             //fprintf(IQvstimeStdin, "%i, %f, %f, %f, %f, %f, %f\n", n / symbolPeriod % (2*3), creal(IQ), cimag(IQ), creal(IQlast), cimag(IQlast), creal(IQmidpoint), cimag(IQmidpoint));
             fprintf(IQvstimeStdin, "%f, %f, %f\n", (n / symbolPeriod) % (2*3) + 0., creal(IQ), cimag(IQ));
             fprintf(IQvstimeStdin, "%f, %f, %f\n", (n / symbolPeriod) % (2*3) + 0.5, creal(IQmidpoint), cimag(IQmidpoint));

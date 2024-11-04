@@ -10,8 +10,21 @@
 
 double simpleQAM(int n, double t)
 {
-    int symbolPeriod = 32;
+    int symbolPeriod = 64;
+    int k = 4;      // this is effectively the OFDM channel number, how many cycles per sample period
     //uint8_t count = t * 100;
+
+    // generating offsets in time to test the frame time syncronizer in qamDecoder
+    //int phaseOffset = n * 4 * 2 / symbolPeriod / 2000 % 4 * symbolPeriod / 4;
+    //int phaseOffset = n * 8 * 2 / symbolPeriod / 2000 % 8 * symbolPeriod / 8;
+    int phaseOffset = 3 * symbolPeriod / 4 + 1;
+    /*
+    static int phaseOffset = -1;
+    if(phaseOffset == -1)
+        phaseOffset = rand() % symbolPeriod;
+    */
+    n += phaseOffset;
+
     long count = n / symbolPeriod;
     int power = 2;  // log base2 of number of symbols. number of symbols should also be a perfect square
     int symbols = pow(2, power);
@@ -23,19 +36,37 @@ double simpleQAM(int n, double t)
     static double oldI = 0;
     static double oldQ = 0;
 
+
+
     // determine the I and Q
-    //double I = (double)(count % square) / (square - 1) * 2 - 1;
-    //double Q = (double)(count / square) / (square - 1) * 2 - 1;
     //double I = count % 2 * 2 - 1;
+    double Q = count % 2 * 2 - 1;
+    //double Q = count / 2 * 2 - 1;
+    //double I = count % 2;
     //double Q = (count + 1) % 2;
+    double I = 0;
     //double Q = 0;
 
+    // sequentially hit all the IQ values in order in the constelation defined by power
+    //double I = (double)(count % square) / (square - 1) * 2 - 1;
+    //double Q = (double)(count / square) / (square - 1) * 2 - 1;
+    
+    /*
+    // random IQ in constelation defined by power
     static double I = 0;
-    double Q = 0;
-    if(n % symbolPeriod == 0)
+    static double Q = 0;
+    if(n / symbolPeriod < 150)
     {
-        I = (double)(rand() % 2) * 2 - 1;
+        // add a preamble that's easy to get rough time sync to
+        I = count % 2 * 2 - 1;
+    } else if(n % symbolPeriod == 0) {
+        // then start sending random data
+        //I = ((double)(rand() % 2) * 2 - 1) / 1;
+        //Q = ((double)(rand() % 2) * 2 - 1) / 1;
+        I = (double)(rand() % square) / (square - 1) * 2 - 1;
+        Q = (double)(rand() % square) / (square - 1) * 2 - 1;
     }
+    */
 
     // variables to enable transition IQ values
     static double decayStartTime = 0;
@@ -65,10 +96,10 @@ double simpleQAM(int n, double t)
 
     double totalAmplitude = 0.01;
     //double totalAmplitude = 1;
-    double randomness = 0;
+    double randomness = 0.0;
     double randI = ((double)rand() / RAND_MAX * 2 - 1) * randomness;
     double randQ = ((double)rand() / RAND_MAX * 2 - 1) * randomness;
-    return ((I + randI) * cos(2*M_PI*n/symbolPeriod) + (Q + randQ) * sin(2*M_PI*n/symbolPeriod))/2*sqrt(2) * totalAmplitude;
+    return ((I + randI) * cos(2*M_PI*n * k/symbolPeriod) + (Q + randQ) * sin(2*M_PI*n * k/symbolPeriod))/2*sqrt(2) * totalAmplitude;
     //return (I * sin(2*M_PI*t*600) + Q * cos(2*M_PI*t*600))/2*sqrt(2);
     //return (I * sin(2*M_PI*t*6000) + Q * cos(2*M_PI*t*6000))/2*sqrt(2);
 }
