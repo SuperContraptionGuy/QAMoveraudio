@@ -47,6 +47,22 @@ int main(int argc, char** args)
     FILE* waveformPlotStdin = popen(buffer, "w");    // using it to plot the time domain signal
     stringLength = 0;
     stringLength += sprintf(buffer + stringLength,"feedgnuplot ");
+    stringLength += sprintf(buffer + stringLength,"--domain --dataid --lines --points ");
+    stringLength += sprintf(buffer + stringLength,"--title \"FFT debuger graph\" ");
+    stringLength += sprintf(buffer + stringLength,"--xlabel \"Time (microphone sample #\" --ylabel \"value\" ");
+    stringLength += sprintf(buffer + stringLength,"--legend 0 \"input samples\" ");
+    stringLength += sprintf(buffer + stringLength,"--legend 1 \"fft real\" ");
+    stringLength += sprintf(buffer + stringLength,"--legend 2 \"fft imaginary\" ");
+    stringLength += sprintf(buffer + stringLength,"--legend 3 \"I decision\" ");
+    stringLength += sprintf(buffer + stringLength,"--legend 4 \"Q decision\" ");
+    stringLength += sprintf(buffer + stringLength,"--legend 5 \"input samples mid\" ");
+    stringLength += sprintf(buffer + stringLength,"--legend 6 \"fft real mid\" ");
+    stringLength += sprintf(buffer + stringLength,"--legend 7 \"fft imaginary mid\" ");
+    stringLength += sprintf(buffer + stringLength,"--legend 8 \"I decision mid\" ");
+    stringLength += sprintf(buffer + stringLength,"--legend 9 \"Q decision mid\" ");
+    FILE* fftDebuggerStdin = popen(buffer, "w");    // using it to plot the time domain signal
+    stringLength = 0;
+    stringLength += sprintf(buffer + stringLength,"feedgnuplot ");
     stringLength += sprintf(buffer + stringLength,"--domain --lines --points ");
     stringLength += sprintf(buffer + stringLength,"--title \"Time Domain error signal\" ");
     stringLength += sprintf(buffer + stringLength,"--legend 0 \"estimated phase offset\" ");
@@ -103,12 +119,20 @@ int main(int argc, char** args)
             for(int i = 0; i < symbolPeriod; i++)
             {
                 // phasor offsets the cos and sin waves so that they allign with the time sequence of data in the half overwritten buffer
-                double phase = (double)((i + bufferIndex + 1)%symbolPeriod) * k / symbolPeriod;
+                int index = (i + bufferIndex + 1)%symbolPeriod; // index that is based on the fact we are starting partway through the buffer
+                double phase = (double)(i) * k / symbolPeriod;
                 //IQmidpoint += sampleBuffer[i] * cos(2*M_PI*phase) + I * sampleBuffer[i] * sin(2*M_PI*phase);
-                IQmidpoint += sampleBuffer[i] * cexp(I*2*M_PI*phase);
+                double complex wave = cexp(I*2*M_PI*phase);
+                IQmidpoint += sampleBuffer[index] * wave;
+
+                // debug graph outputs
+                fprintf(fftDebuggerStdin, "%i %i %f %i %f %i %f\n", n + i, 5, sampleBuffer[index] + 4, 6, creal(wave) + 4, 7, cimag(wave) + 4);
             }
             // normalization factor
             IQmidpoint *= sqrt(1. / symbolPeriod) / k;
+            // debug fft plot
+            fprintf(fftDebuggerStdin, "%i %i %f %i %f\n", n, 8, creal(IQmidpoint) + 4, 9, cimag(IQmidpoint) + 4);
+            fprintf(fftDebuggerStdin, "%f %i %f %i %f\n", n + symbolPeriod - 0.01, 8, creal(IQmidpoint) + 4, 9, cimag(IQmidpoint) + 4);
             //printf("midpoint IQ: %f + %fi\n", creal(IQmidpoint), cimag(IQmidpoint));
         }
         // if the window buffer is filled, ie, we're on the last index of the buffer
@@ -129,15 +153,23 @@ int main(int argc, char** args)
                 double phase = (double)i * k /symbolPeriod;  // one cycle per symbol period
                 //double phase = (double)((i + bufferIndex + 1)%symbolPeriod) * k / symbolPeriod;
                 //IQ += sampleBuffer[i] * cos(2*M_PI*phase) + I * sampleBuffer[i] * sin(2*M_PI*phase);
-                IQ += sampleBuffer[i] * cexp(I*2*M_PI*phase);
+                double complex wave = cexp(I*2*M_PI*phase);
+                IQ += sampleBuffer[i] * wave;
 
                 // compute RMS amplitude for equalization
                 RMS += pow(sampleBuffer[i], 2);
+
+                // debug graph outputs
+                fprintf(fftDebuggerStdin, "%i %i %f %i %f %i %f\n", n + i, 0, sampleBuffer[i], 1, creal(wave), 2, cimag(wave));
             }
             // normalization with a unitary normalization factor
             IQ *= sqrt(1. / symbolPeriod) / k;
             // complete the RMS fomula
             RMS = sqrt(1./symbolPeriod * RMS);
+        
+            // debug fft plot
+            fprintf(fftDebuggerStdin, "%i %i %f %i %f\n", n, 3, creal(IQ), 4, cimag(IQ));
+            fprintf(fftDebuggerStdin, "%f %i %f %i %f\n", n + symbolPeriod - 0.01, 3, creal(IQ), 4, cimag(IQ));
             
             // averaging filter for the equalizer
             static double rmsaverageWindow[5] = {0};
@@ -180,7 +212,7 @@ int main(int argc, char** args)
             lastError = error;
             //double phaseAdjustment = (errorDerivative * -1.0 + errorIntegral * 0.0 + error * 6.0) * 1;
             //double phaseAdjustment = (errorDerivative * 0.0 + errorIntegral * 0.00 + error * 0.1) * 1;
-            double phaseAdjustment = (errorDerivative * 0.0 + errorIntegral * 0.000 + error * 0.8) * 1;
+            double phaseAdjustment = (errorDerivative * 0.1 + errorIntegral * 0.010 + error * 0.5) * 1;
 
             windowPhaseReal += phaseAdjustment;
             //windowPhaseReal = fmod(windowPhaseReal + phaseAdjustment, symbolPeriod);
@@ -231,6 +263,11 @@ int main(int argc, char** args)
     if(!fork())
     {
         pclose(waveformPlotStdin);
+        return 0;
+    }
+    if(!fork())
+    {
+        pclose(fftDebuggerStdin);
         return 0;
     }
 
