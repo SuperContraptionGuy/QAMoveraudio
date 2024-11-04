@@ -13,7 +13,7 @@
 #define SYMBOL_PERIOD 64
 
 // Debug flag
-#define DEBUG_LEVEL 0
+#define DEBUG_LEVEL 1
 
 typedef struct
 {
@@ -28,20 +28,22 @@ typedef enum
 {
     ALLIGNED = 0,
     MIDPOINT = 1,
-    NO_DEBUG,
 } dft_debug_t;
 
-// calculate the discrete fourier transform of an array of possibly complex values but only at frequency 'k' (k cycles per windowSize samples)
+// calculate the discrete fourier transform of an array of real values but only at frequency 'k' (k cycles per windowSize samples)
 //  debugFlag is to print the right debug info for different situations
-double complex dft(double* buffer, int windowSize, int offset, int k, dft_debug_t debugFlag, FILE** debugStreams, int debug_n)
+double complex dft(double* buffer, int windowSize, int offset, int k, double* rmsOut, dft_debug_t debugFlag, FILE* debug_fd, int debug_n)
 {
-#if DEBUG_FLAG != 1
+#if DEBUG_LEVEL <= 1
     (void)debugFlag;
-    (void)debugStreams;
+    (void)debug_fd;
     (void)debug_n;
 #endif
 
+    // compute DFT (rn just one freq (k), but when we implement OFDM, then at many harmonic(orthogonal) frequencies)
+    // here is a simple quadrature detector
     double complex IQ = 0;
+    double RMS = 0;
 
     int bufferIndex;
     double phase;
@@ -51,59 +53,67 @@ double complex dft(double* buffer, int windowSize, int offset, int k, dft_debug_
         // starts at buffer[offset] and wraps around to the beginning of the buffer
         bufferIndex = (i + offset + 1) % windowSize;
         // phase of the complex exponential
+        // phasor offsets the cos and sin waves so that they allign with the time sequence of data in the half overwritten buffer
         phase = (double)i * k / windowSize;
 
-    #if DEBUG_FLAG == 1
-        double complex wave = cexp(I*M_2_PI*phase);
-        double complex value = buffer[bufferIndex] * wave;
-        IQ += value;
+        // use a summation over the symbol period to separate orthogonal components (quadrature components) at the single frequency
+        double complex wave = cexp(I*M_PI*phase); // generate a sample from the complex exponential
+        double complex value = buffer[bufferIndex] * wave;  // multiply the complex exponential by the input sample
+        IQ += value;    // integrate the result over the window
 
+        // compute RMS amplitude for equalization
+        RMS += pow(buffer[i], 2);
+
+
+        // this debug define simplifies the function a bit if debugging is disabled
+    #if DEBUG_LEVEL == 1
         switch(debugFlag)
         {
             case MIDPOINT:
             {
                 // debug graph outputs
-                fprintf(debugStreams[debugFlag], "%i %i %f %i %f %i %f\n", debug_n + i, 5, buffer[bufferIndex] + 4, 6, creal(wave) + 4, 7, cimag(wave) + 4);
-                fprintf(debugStreams[debugFlag], "%i %i %f %i %f %i %f %i %f\n", debug_n + i, 11, creal(value) + 6, 12, cimag(value) + 6, 13, creal(IQ) + 6, 14, cimag(IQ) + 6);
+                fprintf(debug_fd, "%i %i %f %i %f %i %f\n", debug_n + i, 5, buffer[bufferIndex] + 4, 6, creal(wave) + 4, 7, cimag(wave) + 4);
+                fprintf(debug_fd, "%i %i %f %i %f %i %f %i %f\n", debug_n + i, 11, creal(value) + 6, 12, cimag(value) + 6, 13, creal(IQ) + 6, 14, cimag(IQ) + 6);
                 break;
             }
 
             case ALLIGNED:
             {
                 // debug graph outputs
-                fprintf(debugStreams[debugFlag], "%i %i %f %i %f %i %f\n", debug_n + i, 0, buffer[i], 1, creal(wave), 2, cimag(wave));
+                fprintf(debug_fd, "%i %i %f %i %f %i %f\n", debug_n + i, 0, buffer[i], 1, creal(wave), 2, cimag(wave));
                 break;
             }
         }
-    #else
-        IQ += buffer[bufferIndex] * cexp(I * M_2_PI * phase);
     #endif
     }
-
     // normalization factor (do I need to divide by k?)
     IQ *= sqrt(1. / windowSize);
 
-#if DEBUG_FLAG == 1
+    // complete the RMS fomula
+    RMS = sqrt(1./SYMBOL_PERIOD * RMS);
+
+#if DEBUG_LEVEL == 1
     switch(debugFlag)
     {
         case MIDPOINT:
         {
             // debug fft plot
-            fprintf(debugStreams[debugFlag], "%i %i %f %i %f\n", debug_n, 8, creal(IQ) + 4, 9, cimag(IQ) + 4);
-            fprintf(debugStreams[debugFlag], "%f %i %f %i %f\n", debug_n + windowSize - 0.01, 8, creal(IQ) + 4, 9, cimag(IQ) + 4);
+            fprintf(debug_fd, "%i %i %f %i %f\n", debug_n, 8, creal(IQ) + 4, 9, cimag(IQ) + 4);
+            fprintf(debug_fd, "%f %i %f %i %f\n", debug_n + windowSize - 0.01, 8, creal(IQ) + 4, 9, cimag(IQ) + 4);
             break;
         }
 
         case ALLIGNED:
         {
             // debug fft plot
-            fprintf(debugStreams[debugFlag], "%i %i %f %i %f\n", debug_n, 3, creal(IQ), 4, cimag(IQ));
-            fprintf(debugStreams[debugFlag], "%f %i %f %i %f\n", debug_n + windowSize - 0.01, 3, creal(IQ), 4, cimag(IQ));
+            fprintf(debug_fd, "%i %i %f %i %f\n", debug_n, 3, creal(IQ), 4, cimag(IQ));
+            fprintf(debug_fd, "%f %i %f %i %f\n", debug_n + windowSize - 0.01, 3, creal(IQ), 4, cimag(IQ));
             break;
         }
     }
 #endif
 
+    *rmsOut = RMS;
     return IQ;
 }
 
@@ -323,47 +333,21 @@ int main(void)
 
         // if we are half full on the buffer, take an intermidiate IQ sample, for timing sync later
         static double complex IQmidpoint = 0;
+        double RMS;
 
         if((bufferIndex == SYMBOL_PERIOD / 2 - 1) && (n - tookSampleAt > 1))
         {
             IQmidpoint = 0;
 
-            // compute DFT mid symbol (if time is already synced, otherwise it will help sync the time)
-            for(int i = 0; i < SYMBOL_PERIOD; i++)
-            {
-                // phasor offsets the cos and sin waves so that they allign with the time sequence of data in the half overwritten buffer
+            // compute DFT half way between symbols (if time is already synced, otherwise it will help sync the time)
+            IQmidpoint = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex, k, &RMS, MIDPOINT, fftDebuggerStdin, n);
 
-                // index that is based on the fact we are starting partway through the buffer
-                int index = (i + bufferIndex + 1) % SYMBOL_PERIOD;
-
-                double phase = (double)(i) * k / SYMBOL_PERIOD;
-
-                //IQmidpoint += sampleBuffer[i] * cos(2*M_PI*phase) + I * sampleBuffer[i] * sin(2*M_PI*phase);
-
-                double complex wave = cexp(I * 2 * M_PI * phase);
-                double complex value = sampleBuffer[index] * wave;
-
-                IQmidpoint += value;
-
-                // debug graph outputs
-                fprintf(fftDebuggerStdin, "%i %i %f %i %f %i %f\n", n + i, 5, sampleBuffer[index] + 4, 6, creal(wave) + 4, 7, cimag(wave) + 4);
-                fprintf(fftDebuggerStdin, "%i %i %f %i %f %i %f %i %f\n", n + i, 11, creal(value) + 6, 12, cimag(value) + 6, 13, creal(IQmidpoint) + 6, 14, cimag(IQmidpoint) + 6);
-            }
-
-            // normalization factor
-            IQmidpoint *= sqrt(1. / SYMBOL_PERIOD) / k;
-
-            // debug fft plot
-            fprintf(fftDebuggerStdin, "%i %i %f %i %f\n", n, 8, creal(IQmidpoint) + 4, 9, cimag(IQmidpoint) + 4);
-            fprintf(fftDebuggerStdin, "%f %i %f %i %f\n", n + SYMBOL_PERIOD - 0.01, 8, creal(IQmidpoint) + 4, 9, cimag(IQmidpoint) + 4);
-            //printf("midpoint IQ: %f + %fi\n", creal(IQmidpoint), cimag(IQmidpoint));
         }
 
         // if the window buffer is filled, ie, we're on the last index of the buffer
         // I added another condition to help debounce. sometimes it takes many samples in a row due to changing window offset
         static double complex IQ = 0;
         static double complex IQlast = 0;
-        double RMS = 0;
 
         if((bufferIndex == SYMBOL_PERIOD - 1) && (n - tookSampleAt > SYMBOL_PERIOD / 2))
         {
@@ -372,34 +356,11 @@ int main(void)
             IQ = 0;
 
             // compute DFT (rn just one freq, but when we implement OFDM, then at many harmonic(orthogonal) frequencies)
-            // here is a simple quadrature detector
-            for(int i = 0; i < SYMBOL_PERIOD; i++)
-            {
-                // use a summation over the symbol period to separate orthogonal components (quadrature components) at the single frequency
-                double phase = (double)i * k /SYMBOL_PERIOD;  // one cycle per symbol period
+            IQ = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex, k, &RMS, ALLIGNED, fftDebuggerStdin, n);
+            // throwing away the last RMS value from MIDPOINT calculation, which is probably a shame and a waste
+            
 
-                //double phase = (double)((i + bufferIndex + 1)%SYMBOL_PERIOD) * k / SYMBOL_PERIOD;
-                //IQ += sampleBuffer[i] * cos(2*M_PI*phase) + I * sampleBuffer[i] * sin(2*M_PI*phase);
-
-                double complex wave = cexp(I * 2 * M_PI * phase);
-                IQ += sampleBuffer[i] * wave;
-
-                // compute RMS amplitude for equalization
-                RMS += pow(sampleBuffer[i], 2);
-
-                // debug graph outputs
-                fprintf(fftDebuggerStdin, "%i %i %f %i %f %i %f\n", n + i, 0, sampleBuffer[i], 1, creal(wave), 2, cimag(wave));
-            }
-
-            // normalization with a unitary normalization factor
-            IQ *= sqrt(1. / SYMBOL_PERIOD) / k;
-
-            // complete the RMS fomula
-            RMS = sqrt(1./SYMBOL_PERIOD * RMS);
-
-            // debug fft plot
-            fprintf(fftDebuggerStdin, "%i %i %f %i %f\n", n, 3, creal(IQ), 4, cimag(IQ));
-            fprintf(fftDebuggerStdin, "%f %i %f %i %f\n", n + SYMBOL_PERIOD - 0.01, 3, creal(IQ), 4, cimag(IQ));
+            // now I'm doing a bunch of stuff that happens every IQ sample. This all happens in the timespan of a single audio sample, which is 1/symbolPeriod of the time between IQ samples that could be used, but whatever
 
             // averaging filter for the equalizer
             static double rmsaverageWindow[5] = {0};
