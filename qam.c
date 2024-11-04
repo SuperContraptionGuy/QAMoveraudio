@@ -245,7 +245,6 @@ void generateSamplesAndOutput(char* filenameInput)
     // calculate all the samples
     while(n < length)
     {
-;
         // calculate a chunk of samples until the buffer is full or max is reached. one sample at a time, 4 bytes at a time
         for(bufferReadyBytes = 0; bufferReadyBytes < bufferLength & n < length; bufferReadyBytes+=4, n++)
         {

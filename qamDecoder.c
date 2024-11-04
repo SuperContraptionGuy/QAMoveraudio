@@ -8,6 +8,27 @@
 
 
 
+// calculate the discrete fourier transform of an array of possibly complex values but only at frequency 'k' (k cycles per windowSize samples)
+double complex dft(double* buffer, int windowSize, int offset, int k)
+{
+    double complex IQ = 0;
+
+    int bufferIndex;
+    double phase;
+    for(int i = 0; i < windowSize; i++)
+    {
+        // starts at buffer[offset] and wraps around to the beginning of the buffer
+        bufferIndex = (i + offset + 1) % windowSize;
+        // phase of the complex exponential
+        phase = (double)i * k / windowSize;
+        IQ += buffer[bufferIndex] * cexp(I*M_2_PI*phase);
+    }
+    // normalization factor (do I need to divide by k?)
+    IQ *= sqrt(1. / windowSize);
+
+    return IQ;
+}
+
 int main(int argc, char** args)
 {
     typedef struct {
