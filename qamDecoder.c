@@ -12,6 +12,9 @@
 // This is the period of time all the orthogonal symbols will be integrated over
 #define SYMBOL_PERIOD 64
 
+// Debug flag
+#define DEBUG_LEVEL 0
+
 typedef struct
 {
     union
@@ -19,7 +22,7 @@ typedef struct
         int32_t value;
         uint8_t byte[sizeof(int32_t)];
     };
-} sample_32;
+} sample32_t;
 
 typedef enum
 {
@@ -32,10 +35,17 @@ typedef enum
 //  debugFlag is to print the right debug info for different situations
 double complex dft(double* buffer, int windowSize, int offset, int k, dft_debug_t debugFlag, FILE** debugStreams, int debug_n)
 {
+#if DEBUG_FLAG != 1
+    (void)debugFlag;
+    (void)debugStreams;
+    (void)debug_n;
+#endif
+
     double complex IQ = 0;
 
     int bufferIndex;
     double phase;
+
     for(int i = 0; i < windowSize; i++)
     {
         // starts at buffer[offset] and wraps around to the beginning of the buffer
@@ -43,9 +53,7 @@ double complex dft(double* buffer, int windowSize, int offset, int k, dft_debug_
         // phase of the complex exponential
         phase = (double)i * k / windowSize;
 
-
-        //IQ += buffer[bufferIndex] * cexp(I*M_2_PI*phase);
-
+    #if DEBUG_FLAG == 1
         double complex wave = cexp(I*M_2_PI*phase);
         double complex value = buffer[bufferIndex] * wave;
         IQ += value;
@@ -53,33 +61,48 @@ double complex dft(double* buffer, int windowSize, int offset, int k, dft_debug_
         switch(debugFlag)
         {
             case MIDPOINT:
+            {
                 // debug graph outputs
                 fprintf(debugStreams[debugFlag], "%i %i %f %i %f %i %f\n", debug_n + i, 5, buffer[bufferIndex] + 4, 6, creal(wave) + 4, 7, cimag(wave) + 4);
                 fprintf(debugStreams[debugFlag], "%i %i %f %i %f %i %f %i %f\n", debug_n + i, 11, creal(value) + 6, 12, cimag(value) + 6, 13, creal(IQ) + 6, 14, cimag(IQ) + 6);
                 break;
+            }
+
             case ALLIGNED:
+            {
                 // debug graph outputs
                 fprintf(debugStreams[debugFlag], "%i %i %f %i %f %i %f\n", debug_n + i, 0, buffer[i], 1, creal(wave), 2, cimag(wave));
                 break;
+            }
         }
-
+    #else
+        IQ += buffer[bufferIndex] * cexp(I * M_2_PI * phase);
+    #endif
     }
+
     // normalization factor (do I need to divide by k?)
     IQ *= sqrt(1. / windowSize);
-    
+
+#if DEBUG_FLAG == 1
     switch(debugFlag)
     {
         case MIDPOINT:
+        {
             // debug fft plot
             fprintf(debugStreams[debugFlag], "%i %i %f %i %f\n", debug_n, 8, creal(IQ) + 4, 9, cimag(IQ) + 4);
             fprintf(debugStreams[debugFlag], "%f %i %f %i %f\n", debug_n + windowSize - 0.01, 8, creal(IQ) + 4, 9, cimag(IQ) + 4);
             break;
+        }
+
         case ALLIGNED:
+        {
             // debug fft plot
             fprintf(debugStreams[debugFlag], "%i %i %f %i %f\n", debug_n, 3, creal(IQ), 4, cimag(IQ));
             fprintf(debugStreams[debugFlag], "%f %i %f %i %f\n", debug_n + windowSize - 0.01, 3, creal(IQ), 4, cimag(IQ));
             break;
+        }
     }
+#endif
 
     return IQ;
 }
@@ -97,7 +120,7 @@ int main(void)
 
     // the OFDM channel number, how many cycles per symbol
     int k = 4;
-    sample_32 sample;
+    sample32_t sample;
 
     // buffer is the length of the symbol period, so that symbols are orthogonal
     double sampleBuffer[SYMBOL_PERIOD] = {0.0};
