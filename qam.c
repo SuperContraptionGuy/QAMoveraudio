@@ -17,12 +17,17 @@ double simpleQAM(int n, double t)
     // generating offsets in time to test the frame time syncronizer in qamDecoder
     //int phaseOffset = n * 4 * 2 / symbolPeriod / 2000 % 4 * symbolPeriod / 4;
     //int phaseOffset = n * 8 * 2 / symbolPeriod / 2000 % 8 * symbolPeriod / 8;
-    int phaseOffset = 3 * symbolPeriod / 4 + 1;
+    int phaseOffset = n *  2 / 2000 % symbolPeriod;
+    //int phaseOffset = 3 * symbolPeriod / 4 + 1;
+    
     /*
+    // random phase offset
     static int phaseOffset = -1;
     if(phaseOffset == -1)
         phaseOffset = rand() % symbolPeriod;
-    */
+        */
+
+
     n += phaseOffset;
 
     long count = n / symbolPeriod;

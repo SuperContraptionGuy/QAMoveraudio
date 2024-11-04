@@ -60,6 +60,11 @@ int main(int argc, char** args)
     stringLength += sprintf(buffer + stringLength,"--legend 7 \"fft imaginary mid\" ");
     stringLength += sprintf(buffer + stringLength,"--legend 8 \"I decision mid\" ");
     stringLength += sprintf(buffer + stringLength,"--legend 9 \"Q decision mid\" ");
+    stringLength += sprintf(buffer + stringLength,"--legend 10 \"phase error signal\" ");
+    stringLength += sprintf(buffer + stringLength,"--legend 11 \"samp*real\" ");
+    stringLength += sprintf(buffer + stringLength,"--legend 12 \"samp*imag\" ");
+    stringLength += sprintf(buffer + stringLength,"--legend 13 \"integral real\" ");
+    stringLength += sprintf(buffer + stringLength,"--legend 14 \"integral imag\" ");
     FILE* fftDebuggerStdin = popen(buffer, "w");    // using it to plot the time domain signal
     stringLength = 0;
     stringLength += sprintf(buffer + stringLength,"feedgnuplot ");
@@ -97,7 +102,7 @@ int main(int argc, char** args)
     // while there is data to recieve, not end of file
     for(int n = 0;n < symbolPeriod * 2000;n++)
     {
-        // recieve data on stdin, two signed 32bit integers
+        // recieve data on stdin, signed 32bit integer
 
         int bufferIndex = (n + windowPhase)%symbolPeriod;   // use the windowphase to adjust the buffer index position
         for(int i = 0; i < sizeof(sample.value); i++)
@@ -123,10 +128,12 @@ int main(int argc, char** args)
                 double phase = (double)(i) * k / symbolPeriod;
                 //IQmidpoint += sampleBuffer[i] * cos(2*M_PI*phase) + I * sampleBuffer[i] * sin(2*M_PI*phase);
                 double complex wave = cexp(I*2*M_PI*phase);
-                IQmidpoint += sampleBuffer[index] * wave;
+                double complex value = sampleBuffer[index] * wave;
+                IQmidpoint += value;
 
                 // debug graph outputs
                 fprintf(fftDebuggerStdin, "%i %i %f %i %f %i %f\n", n + i, 5, sampleBuffer[index] + 4, 6, creal(wave) + 4, 7, cimag(wave) + 4);
+                fprintf(fftDebuggerStdin, "%i %i %f %i %f %i %f %i %f\n", n + i, 11, creal(value) + 6, 12, cimag(value) + 6, 13, creal(IQmidpoint) + 6, 14, cimag(IQmidpoint) + 6);
             }
             // normalization factor
             IQmidpoint *= sqrt(1. / symbolPeriod) / k;
@@ -192,6 +199,8 @@ int main(int argc, char** args)
             // basically, it's trying to estimate the error of zero crossings
             double phaseOffsetEstimate = -creal((IQ - IQlast) * conj(IQmidpoint));
 
+            fprintf(fftDebuggerStdin, "%i %i %f\n", n, 10, phaseOffsetEstimate + 2);
+
             // Process Variable (PV, ie phase estimate) filter
             // rolling average of phase offset estimate
             static double averageWindow[40] = {0};
@@ -223,7 +232,7 @@ int main(int argc, char** args)
             //windowPhase = (n * 2 / 2000) % symbolPeriod;
             //windowPhase = (n * 4 * 2/ (symbolPeriod * 2000) ) % 4 * symbolPeriod / 4;
             //windowPhase = symbolPeriod / 4;
-            //windowPhase = 0;
+            windowPhase = 0;
             //windowPhase = (int)((windowPhase + phaseAdjustment) < 0 ? (symbolPeriod - windowPhase + phaseAdjustment) : (windowPhase + phaseAdjustment)) % symbolPeriod;
 
             // extract the frequencies to be decoded
