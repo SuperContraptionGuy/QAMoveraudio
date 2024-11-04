@@ -15,8 +15,16 @@ typedef struct
     };
 } sample_32;
 
+typedef enum
+{
+    ALLIGNED = 0,
+    MIDPOINT = 1,
+    NO_DEBUG,
+} dft_debug_t;
+
 // calculate the discrete fourier transform of an array of possibly complex values but only at frequency 'k' (k cycles per windowSize samples)
-double complex dft(double* buffer, int windowSize, int offset, int k)
+//  debugFlag is to print the right debug info for different situations
+double complex dft(double* buffer, int windowSize, int offset, int k, dft_debug_t debugFlag, FILE** debugStreams, int debug_n)
 {
     double complex IQ = 0;
 
@@ -28,10 +36,44 @@ double complex dft(double* buffer, int windowSize, int offset, int k)
         bufferIndex = (i + offset + 1) % windowSize;
         // phase of the complex exponential
         phase = (double)i * k / windowSize;
-        IQ += buffer[bufferIndex] * cexp(I*M_2_PI*phase);
+
+
+        //IQ += buffer[bufferIndex] * cexp(I*M_2_PI*phase);
+
+        double complex wave = cexp(I*M_2_PI*phase);
+        double complex value = buffer[bufferIndex] * wave;
+        IQ += value;
+
+        switch(debugFlag)
+        {
+            case MIDPOINT:
+                // debug graph outputs
+                fprintf(debugStreams[debugFlag], "%i %i %f %i %f %i %f\n", debug_n + i, 5, buffer[bufferIndex] + 4, 6, creal(wave) + 4, 7, cimag(wave) + 4);
+                fprintf(debugStreams[debugFlag], "%i %i %f %i %f %i %f %i %f\n", debug_n + i, 11, creal(value) + 6, 12, cimag(value) + 6, 13, creal(IQ) + 6, 14, cimag(IQ) + 6);
+                break;
+            case ALLIGNED:
+                // debug graph outputs
+                fprintf(debugStreams[debugFlag], "%i %i %f %i %f %i %f\n", debug_n + i, 0, buffer[i], 1, creal(wave), 2, cimag(wave));
+                break;
+        }
+
     }
     // normalization factor (do I need to divide by k?)
     IQ *= sqrt(1. / windowSize);
+    
+    switch(debugFlag)
+    {
+        case MIDPOINT:
+            // debug fft plot
+            fprintf(debugStreams[debugFlag], "%i %i %f %i %f\n", debug_n, 8, creal(IQ) + 4, 9, cimag(IQ) + 4);
+            fprintf(debugStreams[debugFlag], "%f %i %f %i %f\n", debug_n + windowSize - 0.01, 8, creal(IQ) + 4, 9, cimag(IQ) + 4);
+            break;
+        case ALLIGNED:
+            // debug fft plot
+            fprintf(debugStreams[debugFlag], "%i %i %f %i %f\n", debug_n, 3, creal(IQ), 4, cimag(IQ));
+            fprintf(debugStreams[debugFlag], "%f %i %f %i %f\n", debug_n + windowSize - 0.01, 3, creal(IQ), 4, cimag(IQ));
+            break;
+    }
 
     return IQ;
 }
