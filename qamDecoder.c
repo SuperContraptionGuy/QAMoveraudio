@@ -5,6 +5,12 @@
 #include <stdint.h>
 #include <math.h>
 #include <complex.h>
+#include <string.h>
+#include <errno.h>
+
+// length of each symbol in samples, and so the fft window.
+// This is the period of time all the orthogonal symbols will be integrated over
+#define SYMBOL_PERIOD 64
 
 typedef struct
 {
@@ -38,26 +44,26 @@ double complex dft(double* buffer, int windowSize, int offset, int k)
 
 int main(void)
 {
-    // length of each symbol in samples, and so the fft window.
-    // This is the period of time all the orthogonal symbols will be integrated over
-    #define symbolPeriod 64
+    int retval = 0;
+
+    FILE* waveformPlotStdin = NULL;
+    FILE* fftDebuggerStdin = NULL;
+    FILE* errorPlotStdin = NULL;
+    char *iq_plot_buffer = NULL;
+    FILE* IQplotStdin = NULL;
+    FILE* IQvstimeStdin = NULL;
 
     // the OFDM channel number, how many cycles per symbol
     int k = 4;
     sample_32 sample;
 
     // buffer is the length of the symbol period, so that symbols are orthogonal
-    double sampleBuffer[symbolPeriod] = {0.0};
-
-    for(int i = 0; i < symbolPeriod; i++)
-    {
-        sampleBuffer[i] = 0;
-    }
+    double sampleBuffer[SYMBOL_PERIOD] = {0.0};
 
     // the offset of sample buffer or fftwindow in time, to get symbol time sync
     int windowPhase = 0;
 
-    //double windowPhaseReal = (double)rand() / RAND_MAX * symbolPeriod; // the floating point window phase, to be quantized into windowPhase
+    //double windowPhaseReal = (double)rand() / RAND_MAX * SYMBOL_PERIOD; // the floating point window phase, to be quantized into windowPhase
     double windowPhaseReal = 0;
 
     int tookSampleAt = 0;
@@ -65,92 +71,178 @@ int main(void)
     // process arguments
     //  none right now
 
-    char buffer[10000] = {0};
-    int stringLength = 0;
-
     // for live plotting, pipe to feedgnuplot
-    stringLength += sprintf(buffer + stringLength,"feedgnuplot ");
-    stringLength += sprintf(buffer + stringLength,"--domain --lines --points ");
-    stringLength += sprintf(buffer + stringLength,"--title \"Raw signal Time domain\" ");
-    stringLength += sprintf(buffer + stringLength,"--xlabel \"Time (microphone sample #\" --ylabel \"value\" ");
-    stringLength += sprintf(buffer + stringLength,"--legend 0 \"Signal\" ");
-    stringLength += sprintf(buffer + stringLength,"--legend 1 \"equalization factor\" ");
+    const char *plot =
+        "feedgnuplot "
+        "--domain --lines --points "
+        "--title \"Raw signal Time domain\" "
+        "--xlabel \"Time (microphone sample #\" --ylabel \"value\" "
+        "--legend 0 \"Signal\" "
+        "--legend 1 \"equalization factor\" "
+    ;
 
     // using it to plot the time domain signal
-    FILE* waveformPlotStdin = popen(buffer, "w");
+    waveformPlotStdin = popen(plot, "w");
 
-
-    stringLength = 0;
-    stringLength += sprintf(buffer + stringLength, "feedgnuplot ");
-    stringLength += sprintf(buffer + stringLength, "--domain --dataid --lines --points ");
-    stringLength += sprintf(buffer + stringLength, "--title \"FFT debuger graph\" ");
-    stringLength += sprintf(buffer + stringLength, "--xlabel \"Time (microphone sample #\" --ylabel \"value\" ");
-    stringLength += sprintf(buffer + stringLength, "--legend 0 \"input samples\" ");
-    stringLength += sprintf(buffer + stringLength, "--legend 1 \"fft real\" ");
-    stringLength += sprintf(buffer + stringLength, "--legend 2 \"fft imaginary\" ");
-    stringLength += sprintf(buffer + stringLength, "--legend 3 \"I decision\" ");
-    stringLength += sprintf(buffer + stringLength, "--legend 4 \"Q decision\" ");
-    stringLength += sprintf(buffer + stringLength, "--legend 5 \"input samples mid\" ");
-    stringLength += sprintf(buffer + stringLength, "--legend 6 \"fft real mid\" ");
-    stringLength += sprintf(buffer + stringLength, "--legend 7 \"fft imaginary mid\" ");
-    stringLength += sprintf(buffer + stringLength, "--legend 8 \"I decision mid\" ");
-    stringLength += sprintf(buffer + stringLength, "--legend 9 \"Q decision mid\" ");
-    stringLength += sprintf(buffer + stringLength, "--legend 10 \"phase error signal\" ");
-    stringLength += sprintf(buffer + stringLength, "--legend 11 \"samp*real\" ");
-    stringLength += sprintf(buffer + stringLength, "--legend 12 \"samp*imag\" ");
-    stringLength += sprintf(buffer + stringLength, "--legend 13 \"integral real\" ");
-    stringLength += sprintf(buffer + stringLength, "--legend 14 \"integral imag\" ");
-
-    // using it to plot the time domain signal
-    FILE* fftDebuggerStdin = popen(buffer, "w");
-
-
-    stringLength = 0;
-    stringLength += sprintf(buffer + stringLength, "feedgnuplot ");
-    stringLength += sprintf(buffer + stringLength, "--domain --lines --points ");
-    stringLength += sprintf(buffer + stringLength, "--title \"Time Domain error signal\" ");
-    stringLength += sprintf(buffer + stringLength, "--legend 0 \"estimated phase offset\" ");
-    stringLength += sprintf(buffer + stringLength, "--legend 1 \"rolling average error signal\" ");
-    stringLength += sprintf(buffer + stringLength, "--legend 2 \"PI filtered signal\" ");
-    stringLength += sprintf(buffer + stringLength, "--legend 3 \"fft window phase shift\" ");
-    stringLength += sprintf(buffer + stringLength, "--legend 4 \"real target phase offset\" ");
-
-    // using it to plot the time domain signal
-    FILE* errorPlotStdin = popen(buffer, "w");
-    //FILE* IQplotStdin = popen("feedgnuplot --domain --points --title \"IQ plot\" --unset key", "w");
-
-
-    stringLength = 0;
-    stringLength += sprintf(buffer + stringLength, "feedgnuplot ");
-    stringLength += sprintf(buffer + stringLength, "--dataid --domain --points --maxcurves %i ", symbolPeriod * 2 + 1);
-    stringLength += sprintf(buffer + stringLength, "--title \"IQ plot\" ");
-    stringLength += sprintf(buffer + stringLength, "--xlabel \"I\" --ylabel \"Q\" ");
-
-    for(int i = 0; i < symbolPeriod; i++)
+    if (waveformPlotStdin == NULL)
     {
-        stringLength += sprintf(buffer + stringLength,"--legend %i \"Phase offset %i samples\" ", i, i);
+        fprintf(stderr, "Failed to create waveform plot: %s\n", strerror(errno));
+        retval = 1;
+        goto exit;
     }
 
-    FILE* IQplotStdin = popen(buffer, "w");
+    const char *debugPlot =
+        "feedgnuplot "
+        "--domain --dataid --lines --points "
+        "--title \"FFT debuger graph\" "
+        "--xlabel \"Time (microphone sample #\" --ylabel \"value\" "
+        "--legend 0 \"input samples\" "
+        "--legend 1 \"fft real\" "
+        "--legend 2 \"fft imaginary\" "
+        "--legend 3 \"I decision\" "
+        "--legend 4 \"Q decision\" "
+        "--legend 5 \"input samples mid\" "
+        "--legend 6 \"fft real mid\" "
+        "--legend 7 \"fft imaginary mid\" "
+        "--legend 8 \"I decision mid\" "
+        "--legend 9 \"Q decision mid\" "
+        "--legend 10 \"phase error signal\" "
+        "--legend 11 \"samp*real\" "
+        "--legend 12 \"samp*imag\" "
+        "--legend 13 \"integral real\" "
+        "--legend 14 \"integral imag\" "
+    ;
+
+    // using it to plot the time domain signal
+    fftDebuggerStdin = popen(debugPlot, "w");
+
+    if (fftDebuggerStdin == NULL)
+    {
+        fprintf(stderr, "Failed to create fft debug plot: %s\n", strerror(errno));
+        retval = 2;
+        goto exit;
+    }
+
+    const char *errorPlot =
+        "feedgnuplot "
+        "--domain --lines --points "
+        "--title \"Time Domain error signal\" "
+        "--legend 0 \"estimated phase offset\" "
+        "--legend 1 \"rolling average error signal\" "
+        "--legend 2 \"PI filtered signal\" "
+        "--legend 3 \"fft window phase shift\" "
+        "--legend 4 \"real target phase offset\" "
+    ;
+
+    // using it to plot the time domain signal
+    errorPlotStdin = popen(errorPlot, "w");
+
+    if (errorPlotStdin == NULL)
+    {
+        fprintf(stderr, "Failed to create error plot: %s\n", strerror(errno));
+        retval = 3;
+        goto exit;
+    }
+
+    //FILE* IQplotStdin = popen("feedgnuplot --domain --points --title \"IQ plot\" --unset key", "w");
+
+    // Allocate buffer for call to feedgnuplot for IQ plot
+    iq_plot_buffer = malloc(120 + (50 * SYMBOL_PERIOD));
+
+    // Check if allocation failed
+    if (iq_plot_buffer == NULL)
+    {
+        fprintf(stderr, "Failed to allocate buffer for IQ plot: %s\n", strerror(errno));
+        retval = 4;
+        goto exit;
+    }
+
+    int stringLength = 0;
+
+    stringLength += snprintf(iq_plot_buffer, 120,
+        "feedgnuplot "
+        "--dataid --domain --points --maxcurves %i "
+        "--title \"IQ plot\" "
+        "--xlabel \"I\" --ylabel \"Q\" ",
+        SYMBOL_PERIOD * 2 + 1
+    );
+
+    if (stringLength < 0)
+    {
+        fprintf(stderr, "Printing iq plot buffer failed: %s\n", strerror(errno));
+        retval = 5;
+        goto exit;
+    }
+    else if (stringLength == 120)
+    {
+        fprintf(stderr, "Printing iq plot buffer failed: truncated");
+        retval = 5;
+        goto exit;
+    }
+
+    for(int i = 0; i < SYMBOL_PERIOD; i++)
+    {
+        stringLength += snprintf(iq_plot_buffer + stringLength, 50,
+            "--legend %i \"Phase offset %i samples\" ",
+            i,
+            i
+        );
+
+        if (stringLength < 0)
+        {
+            fprintf(stderr, "Printing iq plot buffer failed: %s\n", strerror(errno));
+            retval = 5;
+            goto exit;
+        }
+        else if (stringLength == 50)
+        {
+            fprintf(stderr, "Printing iq plot buffer failed: truncated");
+            retval = 5;
+            goto exit;
+        }
+    }
+
+    IQplotStdin = popen(iq_plot_buffer, "w");
+
+    // Free buffer, even if popen failed
+    free(iq_plot_buffer);
+    iq_plot_buffer = NULL;
+
+    if (IQplotStdin == NULL)
+    {
+        fprintf(stderr, "Failed to create IQ plot: %s\n", strerror(errno));
+        retval = 6;
+        goto exit;
+    }
 
     // for ploting IQ values over time to hopefully obtain an error function
-    stringLength = 0;
-    stringLength += sprintf(buffer + stringLength, "feedgnuplot ");
-    stringLength += sprintf(buffer + stringLength, "--domain --lines --points --unset grid ");
-    stringLength += sprintf(buffer + stringLength, "--title \"IQ vs time Eye Diagram\" ");
-    stringLength += sprintf(buffer + stringLength, "--xlabel \"Time (IQsample #)\" --ylabel \"value\" ");
-    stringLength += sprintf(buffer + stringLength, "--legend 0 \"I\" --legend 1 \"Q\" ");
-    stringLength += sprintf(buffer + stringLength, "--legend 2 \"IQlastReal\" --legend 3 \"IQlastImag\" ");
-    stringLength += sprintf(buffer + stringLength, "--legend 4 \"IQmidReal\" --legend 5 \"IQmidImag\" ");
-    FILE* IQvstimeStdin = popen(buffer, "w");    // using it to plot the time domain signal
+    const char *iqPlot =
+        "feedgnuplot "
+        "--domain --lines --points --unset grid "
+        "--title \"IQ vs time Eye Diagram\" "
+        "--xlabel \"Time (IQsample #)\" --ylabel \"value\" "
+        "--legend 0 \"I\" --legend 1 \"Q\" "
+        "--legend 2 \"IQlastReal\" --legend 3 \"IQlastImag\" "
+        "--legend 4 \"IQmidReal\" --legend 5 \"IQmidImag\" "
+    ;
+
+    // using it to plot the time domain signal
+    IQvstimeStdin = popen(iqPlot, "w");
+
+    if (IQvstimeStdin == NULL)
+    {
+        fprintf(stderr, "Failed to create IQ vs Time plot: %s\n", strerror(errno));
+        retval = 7;
+        goto exit;
+    }
 
     // while there is data to recieve, not end of file
-    for(int n = 0; n < symbolPeriod * 2000; n++)
+    for(int n = 0; n < SYMBOL_PERIOD * 2000; n++)
     {
         // recieve data on stdin, signed 32bit integer
 
         // use the windowphase to adjust the buffer index position
-        int bufferIndex = (n + windowPhase)%symbolPeriod;
+        int bufferIndex = (n + windowPhase)%SYMBOL_PERIOD;
 
         for(size_t i = 0; i < sizeof(sample.value); i++)
         {
@@ -167,19 +259,19 @@ int main(void)
         // if we are half full on the buffer, take an intermidiate IQ sample, for timing sync later
         static double complex IQmidpoint = 0;
 
-        if((bufferIndex == symbolPeriod / 2 - 1) && (n - tookSampleAt > 1))
+        if((bufferIndex == SYMBOL_PERIOD / 2 - 1) && (n - tookSampleAt > 1))
         {
             IQmidpoint = 0;
 
             // compute DFT mid symbol (if time is already synced, otherwise it will help sync the time)
-            for(int i = 0; i < symbolPeriod; i++)
+            for(int i = 0; i < SYMBOL_PERIOD; i++)
             {
                 // phasor offsets the cos and sin waves so that they allign with the time sequence of data in the half overwritten buffer
 
                 // index that is based on the fact we are starting partway through the buffer
-                int index = (i + bufferIndex + 1)%symbolPeriod;
+                int index = (i + bufferIndex + 1) % SYMBOL_PERIOD;
 
-                double phase = (double)(i) * k / symbolPeriod;
+                double phase = (double)(i) * k / SYMBOL_PERIOD;
 
                 //IQmidpoint += sampleBuffer[i] * cos(2*M_PI*phase) + I * sampleBuffer[i] * sin(2*M_PI*phase);
 
@@ -194,11 +286,11 @@ int main(void)
             }
 
             // normalization factor
-            IQmidpoint *= sqrt(1. / symbolPeriod) / k;
+            IQmidpoint *= sqrt(1. / SYMBOL_PERIOD) / k;
 
             // debug fft plot
             fprintf(fftDebuggerStdin, "%i %i %f %i %f\n", n, 8, creal(IQmidpoint) + 4, 9, cimag(IQmidpoint) + 4);
-            fprintf(fftDebuggerStdin, "%f %i %f %i %f\n", n + symbolPeriod - 0.01, 8, creal(IQmidpoint) + 4, 9, cimag(IQmidpoint) + 4);
+            fprintf(fftDebuggerStdin, "%f %i %f %i %f\n", n + SYMBOL_PERIOD - 0.01, 8, creal(IQmidpoint) + 4, 9, cimag(IQmidpoint) + 4);
             //printf("midpoint IQ: %f + %fi\n", creal(IQmidpoint), cimag(IQmidpoint));
         }
 
@@ -208,7 +300,7 @@ int main(void)
         static double complex IQlast = 0;
         double RMS = 0;
 
-        if((bufferIndex == symbolPeriod - 1) && (n - tookSampleAt > symbolPeriod / 2))
+        if((bufferIndex == SYMBOL_PERIOD - 1) && (n - tookSampleAt > SYMBOL_PERIOD / 2))
         {
             tookSampleAt = n;
             IQlast = IQ;
@@ -216,12 +308,12 @@ int main(void)
 
             // compute DFT (rn just one freq, but when we implement OFDM, then at many harmonic(orthogonal) frequencies)
             // here is a simple quadrature detector
-            for(int i = 0; i < symbolPeriod; i++)
+            for(int i = 0; i < SYMBOL_PERIOD; i++)
             {
                 // use a summation over the symbol period to separate orthogonal components (quadrature components) at the single frequency
-                double phase = (double)i * k /symbolPeriod;  // one cycle per symbol period
+                double phase = (double)i * k /SYMBOL_PERIOD;  // one cycle per symbol period
 
-                //double phase = (double)((i + bufferIndex + 1)%symbolPeriod) * k / symbolPeriod;
+                //double phase = (double)((i + bufferIndex + 1)%SYMBOL_PERIOD) * k / SYMBOL_PERIOD;
                 //IQ += sampleBuffer[i] * cos(2*M_PI*phase) + I * sampleBuffer[i] * sin(2*M_PI*phase);
 
                 double complex wave = cexp(I * 2 * M_PI * phase);
@@ -235,19 +327,19 @@ int main(void)
             }
 
             // normalization with a unitary normalization factor
-            IQ *= sqrt(1. / symbolPeriod) / k;
+            IQ *= sqrt(1. / SYMBOL_PERIOD) / k;
 
             // complete the RMS fomula
-            RMS = sqrt(1./symbolPeriod * RMS);
+            RMS = sqrt(1./SYMBOL_PERIOD * RMS);
 
             // debug fft plot
             fprintf(fftDebuggerStdin, "%i %i %f %i %f\n", n, 3, creal(IQ), 4, cimag(IQ));
-            fprintf(fftDebuggerStdin, "%f %i %f %i %f\n", n + symbolPeriod - 0.01, 3, creal(IQ), 4, cimag(IQ));
+            fprintf(fftDebuggerStdin, "%f %i %f %i %f\n", n + SYMBOL_PERIOD - 0.01, 3, creal(IQ), 4, cimag(IQ));
 
             // averaging filter for the equalizer
             static double rmsaverageWindow[5] = {0};
             int rmsaverageSize = 5;
-            int rmsaverageIndex = (n / symbolPeriod) % rmsaverageSize;
+            int rmsaverageIndex = (n / SYMBOL_PERIOD) % rmsaverageSize;
 
             rmsaverageWindow[rmsaverageIndex] = 1./sqrt(2) - RMS;
             double rmsaverage = 0;
@@ -275,7 +367,7 @@ int main(void)
             // rolling average of phase offset estimate
             static double averageWindow[40] = {0};
             int averageSize = 40;
-            int averageIndex = (n / symbolPeriod) % averageSize;
+            int averageIndex = (n / SYMBOL_PERIOD) % averageSize;
 
             averageWindow[averageIndex] = phaseOffsetEstimate;
 
@@ -302,16 +394,16 @@ int main(void)
             double phaseAdjustment = (errorDerivative * 0.1 + errorIntegral * 0.010 + error * 0.5) * 1;
 
             windowPhaseReal += phaseAdjustment;
-            //windowPhaseReal = fmod(windowPhaseReal + phaseAdjustment, symbolPeriod);
-            //windowPhaseReal = windowPhaseReal < 0 ? symbolPeriod + windowPhaseReal : windowPhaseReal;
-            //windowPhase = (int)round(windowPhaseReal) % symbolPeriod;
-            windowPhase = (int)round(windowPhaseReal) % symbolPeriod; // quantize the real window phase
-            windowPhase = windowPhase < 0 ? symbolPeriod + windowPhase : windowPhase;
-            //windowPhase = (n * 2 / 2000) % symbolPeriod;
-            //windowPhase = (n * 4 * 2/ (symbolPeriod * 2000) ) % 4 * symbolPeriod / 4;
-            //windowPhase = symbolPeriod / 4;
+            //windowPhaseReal = fmod(windowPhaseReal + phaseAdjustment, SYMBOL_PERIOD);
+            //windowPhaseReal = windowPhaseReal < 0 ? SYMBOL_PERIOD + windowPhaseReal : windowPhaseReal;
+            //windowPhase = (int)round(windowPhaseReal) % SYMBOL_PERIOD;
+            windowPhase = (int)round(windowPhaseReal) % SYMBOL_PERIOD; // quantize the real window phase
+            windowPhase = windowPhase < 0 ? SYMBOL_PERIOD + windowPhase : windowPhase;
+            //windowPhase = (n * 2 / 2000) % SYMBOL_PERIOD;
+            //windowPhase = (n * 4 * 2/ (SYMBOL_PERIOD * 2000) ) % 4 * SYMBOL_PERIOD / 4;
+            //windowPhase = SYMBOL_PERIOD / 4;
             windowPhase = 0;
-            //windowPhase = (int)((windowPhase + phaseAdjustment) < 0 ? (symbolPeriod - windowPhase + phaseAdjustment) : (windowPhase + phaseAdjustment)) % symbolPeriod;
+            //windowPhase = (int)((windowPhase + phaseAdjustment) < 0 ? (SYMBOL_PERIOD - windowPhase + phaseAdjustment) : (windowPhase + phaseAdjustment)) % SYMBOL_PERIOD;
 
             // extract the frequencies to be decoded
             // add the relevant IQ values to an array
@@ -321,47 +413,54 @@ int main(void)
 
             // plot with a new color for each window phase
             fprintf(IQplotStdin, "%f %i %f\n", creal(IQ), windowPhase, cimag(IQ));
-            //fprintf(IQplotStdin, "%f %i %f\n", creal(IQmidpoint), windowPhase + symbolPeriod, cimag(IQmidpoint));
-            fprintf(errorPlotStdin, "%i, %f %f %f %f %f\n", n / symbolPeriod, -phaseOffsetEstimate, error, phaseAdjustment, (double)windowPhase / symbolPeriod, windowPhaseReal / symbolPeriod);
-            //fprintf(IQvstimeStdin, "%i, %f, %f, %f, %f, %f, %f\n", n / symbolPeriod % (2*3), creal(IQ), cimag(IQ), creal(IQlast), cimag(IQlast), creal(IQmidpoint), cimag(IQmidpoint));
-            fprintf(IQvstimeStdin, "%f, %f, %f\n", (n / symbolPeriod) % (2*3) + 0., creal(IQ), cimag(IQ));
-            fprintf(IQvstimeStdin, "%f, %f, %f\n", (n / symbolPeriod) % (2*3) + 0.5, creal(IQmidpoint), cimag(IQmidpoint));
+            //fprintf(IQplotStdin, "%f %i %f\n", creal(IQmidpoint), windowPhase + SYMBOL_PERIOD, cimag(IQmidpoint));
+            fprintf(errorPlotStdin, "%i, %f %f %f %f %f\n", n / SYMBOL_PERIOD, -phaseOffsetEstimate, error, phaseAdjustment, (double)windowPhase / SYMBOL_PERIOD, windowPhaseReal / SYMBOL_PERIOD);
+            //fprintf(IQvstimeStdin, "%i, %f, %f, %f, %f, %f, %f\n", n / SYMBOL_PERIOD % (2*3), creal(IQ), cimag(IQ), creal(IQlast), cimag(IQlast), creal(IQmidpoint), cimag(IQmidpoint));
+            fprintf(IQvstimeStdin, "%f, %f, %f\n", (n / SYMBOL_PERIOD) % (2*3) + 0., creal(IQ), cimag(IQ));
+            fprintf(IQvstimeStdin, "%f, %f, %f\n", (n / SYMBOL_PERIOD) % (2*3) + 0.5, creal(IQmidpoint), cimag(IQmidpoint));
         }
 
          // I think I'll use feedgnuplot, so pipe the IQ values into feedgnuplot
     }
 
+exit:
+    if (iq_plot_buffer != NULL)
+    {
+        free(iq_plot_buffer);
+        iq_plot_buffer = NULL;
+    }
+
     // close the streams, allowing the plots to render and open a window, then wait for them to terminate in separate threads.
-    if(!fork())
+    if((IQvstimeStdin != NULL) && (fork() == 0))
     {
         pclose(IQvstimeStdin);
         return 0;
     }
 
-    if(!fork())
+    if((IQplotStdin != NULL) && (fork() == 0))
     {
         pclose(IQplotStdin);
         return 0;
     }
 
-    if(!fork())
+    if((errorPlotStdin != NULL) && (fork() == 0))
     {
         pclose(errorPlotStdin);
         return 0;
     }
 
-    if(!fork())
+    if((waveformPlotStdin != NULL) && (fork() == 0))
     {
         pclose(waveformPlotStdin);
         return 0;
     }
 
-    if(!fork())
+    if((fftDebuggerStdin != NULL) && (fork() == 0))
     {
         pclose(fftDebuggerStdin);
         return 0;
     }
 
     // after all the data is recieved, generate a plot of IQ
-    return 0;
+    return retval;
 }
