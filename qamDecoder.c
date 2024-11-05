@@ -28,6 +28,7 @@ typedef enum
 {
     ALLIGNED = 0,
     MIDPOINT = 1,
+    NODEBUG,
 } dft_debug_t;
 
 // calculate the discrete fourier transform of an array of real values but only at frequency 'k' (k cycles per windowSize samples)
@@ -57,7 +58,7 @@ double complex dft(double* buffer, int windowSize, int offset, int k, double* rm
         phase = (double)i * k / windowSize;
 
         // use a summation over the symbol period to separate orthogonal components (quadrature components) at the single frequency
-        double complex wave = cexp(I*M_PI*phase); // generate a sample from the complex exponential
+        double complex wave = cexp(I*2*M_PI*phase); // generate a sample from the complex exponential
         double complex value = buffer[bufferIndex] * wave;  // multiply the complex exponential by the input sample
         IQ += value;    // integrate the result over the window
 
@@ -72,15 +73,18 @@ double complex dft(double* buffer, int windowSize, int offset, int k, double* rm
             case MIDPOINT:
             {
                 // debug graph outputs
-                fprintf(debug_fd, "%i %i %f %i %f %i %f\n", debug_n + i, 5, buffer[bufferIndex] + 4, 6, creal(wave) + 4, 7, cimag(wave) + 4);
-                fprintf(debug_fd, "%i %i %f %i %f %i %f %i %f\n", debug_n + i, 11, creal(value) + 6, 12, cimag(value) + 6, 13, creal(IQ) + 6, 14, cimag(IQ) + 6);
+                // debugging the phase allignment
+                //fprintf(debug_fd, "%i %i %f %i %f %i %f\n", debug_n + i, 5, buffer[bufferIndex] + 4, 6, creal(wave) + 4, 7, cimag(wave) + 4);
+                // debugging the integral
+                //fprintf(debug_fd, "%i %i %f %i %f %i %f %i %f\n", debug_n + i, 11, creal(value) + 6, 12, cimag(value) + 6, 13, creal(IQ) + 6, 14, cimag(IQ) + 6);
                 break;
             }
 
             case ALLIGNED:
             {
                 // debug graph outputs
-                fprintf(debug_fd, "%i %i %f %i %f %i %f\n", debug_n + i, 0, buffer[i], 1, creal(wave), 2, cimag(wave));
+                // debugging the phase allignment
+                //fprintf(debug_fd, "%i %i %f %i %f %i %f\n", debug_n + i, 0, buffer[i], 1, creal(wave), 2, cimag(wave));
                 break;
             }
         }
@@ -127,6 +131,8 @@ int main(void)
     char *iq_plot_buffer = NULL;
     FILE* IQplotStdin = NULL;
     FILE* IQvstimeStdin = NULL;
+    FILE* eyeDiagramRealStdin = NULL;
+    FILE* eyeDiagramImaginaryStdin = NULL;
 
     // the OFDM channel number, how many cycles per symbol
     int k = 4;
@@ -291,18 +297,28 @@ int main(void)
     }
 
     // for ploting IQ values over time to hopefully obtain an error function
-    const char *iqPlot =
+    char eyeDiagramPlotReal[300] = {0};
+    sprintf(
+        eyeDiagramPlotReal,
         "feedgnuplot "
-        "--domain --lines --points --unset grid "
-        "--title \"IQ vs time Eye Diagram\" "
-        "--xlabel \"Time (IQsample #)\" --ylabel \"value\" "
-        "--legend 0 \"I\" --legend 1 \"Q\" "
-        "--legend 2 \"IQlastReal\" --legend 3 \"IQlastImag\" "
-        "--legend 4 \"IQmidReal\" --legend 5 \"IQmidImag\" "
-    ;
+        "--domain --dataid --lines --points --maxcurves %i "
+        "--title \"Eye Diagram, Real part\" "
+        "--xlabel \"Time (Audio sample #)\" --ylabel \"I\" ",
+        3000);
+    eyeDiagramRealStdin = popen(eyeDiagramPlotReal, "w");
+
+    char eyeDiagramPlotImaginary[300] = {0};
+    sprintf(
+        eyeDiagramPlotImaginary,
+        "feedgnuplot "
+        "--domain --dataid --lines --points --maxcurves %i "
+        "--title \"Eye Diagram, Imaginary part\" "
+        "--xlabel \"Time (Audio sample #)\" --ylabel \"Q\" ",
+        3000);
+    eyeDiagramImaginaryStdin = popen(eyeDiagramPlotImaginary, "w");
 
     // using it to plot the time domain signal
-    IQvstimeStdin = popen(iqPlot, "w");
+    IQvstimeStdin = popen(eyeDiagramPlotReal, "w");
 
     if (IQvstimeStdin == NULL)
     {
@@ -334,6 +350,17 @@ int main(void)
         // if we are half full on the buffer, take an intermidiate IQ sample, for timing sync later
         static double complex IQmidpoint = 0;
         double RMS;
+
+        // array storing super sampled IQ values
+        //static double complex IQsamples[SYMBOL_PERIOD];
+        //static double RMSsamples[SYMBOL_PERIOD];
+
+    #if DEBUG_LEVEL > 0
+        // oversampling IQ values for a nice eye diagram to help debug stuff
+        double complex oversampledIQ = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex, k, &RMS, NODEBUG, NULL, n);
+        fprintf(eyeDiagramRealStdin, "%f %i %f\n", fmod((double)n / SYMBOL_PERIOD, 4), n / 4 / SYMBOL_PERIOD, creal(oversampledIQ));
+        fprintf(eyeDiagramImaginaryStdin, "%f %i %f\n", fmod((double)n / SYMBOL_PERIOD, 4), n / 4 / SYMBOL_PERIOD, cimag(oversampledIQ));
+    #endif
 
         if((bufferIndex == SYMBOL_PERIOD / 2 - 1) && (n - tookSampleAt > 1))
         {
@@ -386,8 +413,9 @@ int main(void)
             // Gardner Algorithm: Real Part( derivitive of IQ times conjugate of IQ)
             // basically, it's trying to estimate the error of zero crossings
             double phaseOffsetEstimate = -creal((IQ - IQlast) * conj(IQmidpoint));
+            double phaseOffsetComplex = -cimag((IQ - IQlast) * conj(IQmidpoint));
 
-            fprintf(fftDebuggerStdin, "%i %i %f\n", n, 10, phaseOffsetEstimate + 2);
+            fprintf(fftDebuggerStdin, "%i %i %f %i %f\n", n, 10, phaseOffsetEstimate, 15, phaseOffsetComplex);
 
             // Process Variable (PV, ie phase estimate) filter
             // rolling average of phase offset estimate
@@ -425,11 +453,14 @@ int main(void)
             //windowPhase = (int)round(windowPhaseReal) % SYMBOL_PERIOD;
             windowPhase = (int)round(windowPhaseReal) % SYMBOL_PERIOD; // quantize the real window phase
             windowPhase = windowPhase < 0 ? SYMBOL_PERIOD + windowPhase : windowPhase;
+        #if DEBUG_LEVEL > 0
+            // some options to overwrite the window phase given by the PID controller
             //windowPhase = (n * 2 / 2000) % SYMBOL_PERIOD;
             //windowPhase = (n * 4 * 2/ (SYMBOL_PERIOD * 2000) ) % 4 * SYMBOL_PERIOD / 4;
             //windowPhase = SYMBOL_PERIOD / 4;
             windowPhase = 0;
             //windowPhase = (int)((windowPhase + phaseAdjustment) < 0 ? (SYMBOL_PERIOD - windowPhase + phaseAdjustment) : (windowPhase + phaseAdjustment)) % SYMBOL_PERIOD;
+        #endif
 
             // extract the frequencies to be decoded
             // add the relevant IQ values to an array
@@ -484,6 +515,16 @@ exit:
     if((fftDebuggerStdin != NULL) && (fork() == 0))
     {
         pclose(fftDebuggerStdin);
+        return 0;
+    }
+    if((eyeDiagramRealStdin != NULL) && (fork() == 0))
+    {
+        pclose(eyeDiagramRealStdin);
+        return 0;
+    }
+    if((eyeDiagramImaginaryStdin != NULL) && (fork() == 0))
+    {
+        pclose(eyeDiagramImaginaryStdin);
         return 0;
     }
 
