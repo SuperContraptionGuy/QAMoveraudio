@@ -6,8 +6,43 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <math.h>
+#include <string.h>
+#include <errno.h>
 
-double simpleQAM(int n, double t)
+#define WARN_UNUSED __attribute__((warn_unused_result))
+
+#define DEBUG_LEVEL 0
+
+typedef enum
+{
+    RIFF_TYPE_PCM = 1,
+} riff_type_t;
+
+typedef struct __attribute__((packed))
+{
+    union
+    {
+        struct
+        {
+            char riff[4];               // 0
+            uint32_t size;              // 4
+            char format[4];             // 8
+            char chunk[4];              // 12
+            uint32_t length;            // 16
+            uint16_t type;              // 20
+            uint16_t channels;          // 22
+            uint32_t sampleRate;        // 24
+            uint32_t dataRate;          // 28
+            uint16_t blockSize;         // 32
+            uint16_t bitsPerSample;     // 34
+            char data[4];               // 36
+            uint32_t chunkSize;         // 40
+        };
+        uint8_t bytes[44];
+    };
+} riff_header_t;
+
+static double WARN_UNUSED simpleQAM(int n, double t)
 {
     int symbolPeriod = 64;
     int k = 4;      // this is effectively the OFDM channel number, how many cycles per sample period
@@ -23,7 +58,7 @@ double simpleQAM(int n, double t)
     /*
     // random phase offset
     static int phaseOffset = -1;
-    if(phaseOffset == -1)
+    if (phaseOffset == -1)
         phaseOffset = rand() % symbolPeriod;
         */
 
@@ -56,11 +91,11 @@ double simpleQAM(int n, double t)
     // random IQ in constelation defined by power
     static double I = 0;
     static double Q = 0;
-    if(n / symbolPeriod < 150)
+    if (n / symbolPeriod < 150)
     {
         // add a preamble that's easy to get rough time sync to
         I = count % 2 * 2 - 1;
-    } else if(n % symbolPeriod == 0) {
+    } else if (n % symbolPeriod == 0) {
         // then start sending random data
         //I = ((double)(rand() % 2) * 2 - 1) / 1;
         //Q = ((double)(rand() % 2) * 2 - 1) / 1;
@@ -108,86 +143,80 @@ double simpleQAM(int n, double t)
 }
 
 // this is the point where samples are generated
-double calculateSample(int n, double t)
+static double WARN_UNUSED calculateSample(int n, double t)
 {
     return simpleQAM(n, t);
 }
 
 // generates a .wav header of 44 bytes long
 // length is the number of samples in the file
-int writeHeader(int length, int fileDescriptor)
+static int WARN_UNUSED writeHeader(int length, int fileDescriptor)
 {
-    char header[44] = {0};
-    // pointers to parameters of length 2 bytes, 4 bytes, or signed 4 bytes.
-    // used to write specific bytes in the header with parameter values
-    uint16_t *param2;
-    uint32_t *param4;
-    // int32_t *param4s;
-
-    // RIFF chunk
-    sprintf(header, "RIFF");
-
-    // chunk size plus rest of file size I think (so exluding first 8 bytes of header)
-    param4 = (uint32_t*)(header + 4);
-    *param4 = length * 4 + sizeof(header) - 8;
-
-    sprintf(header + 8, "WAVE");
-
-    // fmt chunk
-    sprintf(header + 12, "fmt ");
-
-    // length of fmt chunk: 16
-    param4 = (uint32_t*)(header + 16);
-    *param4 = 16;
-
-    // format code: 1 PCM
-    param2 = (uint16_t*)(header + 20);
-    *param2 = 1;
-
-    // number of channels: 1
-    param2 = (uint16_t*)(header + 22);
-    *param2 = 1;
-
-    //sample rate: 44100
-    param4 = (uint32_t*)(header + 24);
-    *param4 = 44100;
-
-    // Data rate: 176400 bytes/s
-    param4 = (uint32_t*)(header + 28);
-    *param4 = 176400;
-
-    // Data block size: 4 bytes
-    param2 = (uint16_t*)(header + 32);
-    *param2 = 4;
-
-    // bits per sample
-    param2 = (uint16_t*)(header + 34);
-    *param2 = 32;
-
-    // data chunk
-    sprintf(header + 36, "data");
-
-    // data chunk size
-    param4 = (uint32_t*)(header + 40);
-    *param4 = length * 4;
-
-    //FILE* hexdumpInput = popen("hexdump -C", "w");
-    for(int i = 0; i < 44; i++)
+    riff_header_t header =
     {
-        //putc(header[i], hexdumpInput);
-        //putchar(header[i]);
+        .riff = "RIFF",
+        // chunk size plus rest of file size I think (so exluding first 8 bytes of header)
+        .size = length * 4 + sizeof(riff_header_t) - 8,
+        .format = "WAVE",
+        // fmt chunk
+        .chunk = "fmt ",
+        .length = 16,
+        .type = RIFF_TYPE_PCM,
+        .channels = 1,
+        .sampleRate = 44100,
+        .dataRate = 176400,
+        .blockSize = 4,
+        .bitsPerSample = 32,
+        .data = "data",
+        .chunkSize = length * 4,
+    };
+
+#if DEBUG_LEVEL >= 1
+    // dummy test samples
+    uint8_t dummy[length * 4];
+    memset(dummy, 0, length * 4);
+
+    FILE* hexdumpInput = popen("hexdump -C", "w");
+
+    if (hexdumpInput == NULL)
+    {
+        fprintf(stderr, "Failed to open hexdump: %s\n", strerror(errno));
+        goto exit;
     }
 
-    //dummy test samples
-    for(int i = 0; i < length * 4; i++)
+    size_t ret = fwrite(header.bytes, sizeof(riff_header_t), 1, hexdumpInput);
+
+    if (ret != sizeof(riff_header_t))
     {
-        //putchar(0);
+        fprintf(stderr, "Failed to write to hexdump: %s\n", strerror(errno));
+        goto exit;
     }
 
-    //pclose(hexdumpInput);
-    ssize_t ret = write(fileDescriptor, header, sizeof(header));
+    ret = fwrite(header.bytes, sizeof(riff_header_t), 1, stdout);
 
-    if (ret < 0)
+    if (ret != sizeof(riff_header_t))
+    {
+        fprintf(stderr, "Failed to write to stdout: %s\n", strerror(errno));
+        goto exit;
+    }
+
+    ret = fwrite(dummy, length * 4, 1, stdout);
+
+    if (ret != sizeof(riff_header_t))
+    {
+        fprintf(stderr, "Failed to write to stdout: %s\n", strerror(errno));
+    }
+
+exit:
+    if (hexdumpInput != NULL)
+    {
+        pclose(hexdumpInput);
+    }
+#endif
+
+    ssize_t rets = write(fileDescriptor, header.bytes, sizeof(riff_header_t));
+
+    if (rets < 0)
     {
         return -1;
     }
@@ -195,70 +224,143 @@ int writeHeader(int length, int fileDescriptor)
     return 0;
 }
 
-int generateSamplesAndOutput(char* filenameInput)
+static int WARN_UNUSED generateSamplesAndOutput(char* filenameInput)
 {
     int retval = 0;
 
+    FILE* aplayStdIn = NULL;
+
+#if DEBUG_LEVEL >= 1
+    FILE* hexdumpStdIn = NULL;
+#endif
+
+    int fileDescriptor = -1;
+
     int sampleRate = 44100;
+
+    // total number of samples to generate
+    long length = 100000;
+
+    // the number of the current sample
+    long n = 0;
+
+    // length of the file write buffer, samples times 4 bytes per sample
+    const int bufferLength = 10 * 4;
+
+    // the file write buffer, used to buffer the write calls
+    uint8_t buffer[bufferLength];
+
+    // number of bytes ready to be written out of the buffer in case we need to flush the buffer before it's full
+    int bufferReadyBytes = 0;
+
+    // the sample value used in calculations, to be normalized
+    double value;
+
+    // sample value after put into signed integer range
+    int32_t normalized = 0;
+
+    // maximum signed integer value used for normalization
+    //int32_t max = INT32_MAX > -(long)INT32_MIN ? -INT32_MIN : INT32_MAX;
+
+    // holds each individual byte as it's written out Little Endian style
+    char byte;
+
+    // pointer used for breaking up the normalized value into bytes
+    unsigned char* pointer = (unsigned char*)&normalized;
+
+    // Whether to send samples over stdout or to file
+    int outputstd = 0;
+
+    // User passed '-' -> use stdout
+    if (filenameInput[0] == '-')
+    {
+        outputstd = 1;
+    }
 
     // set up the file descriptors for the various outputs
 
     // setup a file descriptor for a pipe to aplay command to play the sound through the speakers
     char aplayCommandString[30] = {0};
-    snprintf(aplayCommandString, 30, "aplay -f S32_LE -c1 -r %i", sampleRate);
+    int len = snprintf(aplayCommandString, 30, "aplay -f S32_LE -c1 -r %i", sampleRate);
+
+    if (len < 0)
+    {
+        fprintf(stderr, "Failed to write aplay string: %s\n", strerror(errno));
+        retval = 2;
+        goto exit;
+    }
+    else if (len == 30)
+    {
+        fprintf(stderr, "Failed to write aplay string: truncated\n");
+        retval = 2;
+        goto exit;
+    }
+
     //puts(aplayCommandString);
-    FILE* aplayStdIn = popen(aplayCommandString, "w");
+    aplayStdIn = popen(aplayCommandString, "w");
 
-    // for the hex dump of printed bytes.
-
-    int outputstd = 0;  // send samples over stdout instead
-
-    if(filenameInput[0] == '-')
+    if (aplayStdIn == NULL)
     {
-        outputstd = 1;
+        fprintf(stderr, "Failed to open aplay: %s\n", strerror(errno));
+        retval = 3;
+        goto exit;
     }
 
-    FILE* hexdumpStdIn = NULL;
-
-    if(!outputstd)
+#if DEBUG_LEVEL >= 1
+    if (outputstd == 0)
     {
+        // for the hex dump of printed bytes.
         hexdumpStdIn = popen("hexdump -C", "w");
+
+        if (hexdumpStdIn == NULL)
+        {
+            fprintf(stderr, "Failed to open hexdump: %s\n", strerror(errno));
+            retval = 4;
+            goto exit;
+        }
     }
+#endif
 
-    // for the file writing
-    char filename[30] = {0};
-    snprintf(filename, 30, "%s.wav", filenameInput);
-    //puts(filename);
-
-    int fileDescriptor;
-
-    if(!outputstd)
+    if (outputstd == 0)
     {
+        // for the file writing
+        char filename[30] = {0};
+        len = snprintf(filename, 30, "%s.wav", filenameInput);
+
+        if (len < 0)
+        {
+            fprintf(stderr, "Failed to get filename: %s\n", strerror(errno));
+            retval = 5;
+            goto exit;
+        }
+        else if (len == 30)
+        {
+            fprintf(stderr, "Failed to get filename: truncated\n");
+            retval = 5;
+            goto exit;
+        }
+
+        //puts(filename);
+
         fileDescriptor = open(filename, O_WRONLY | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH);
+
+        if (fileDescriptor < 0)
+        {
+            fprintf(stderr, "Failed to open file: %s\n", strerror(errno));
+            retval = 6;
+            goto exit;
+        }
     }
-
-
-    long length = 100000;           // total number of samples to generate
-    long n = 0;                 // the number of the current sample
-    const int bufferLength = 10 * 4;    // length of the file write buffer, samples times 4 bytes per sample
-    uint8_t buffer[bufferLength];   // the file write buffer, used to buffer the write calls
-    int bufferReadyBytes = 0;   // number of bytes ready to be written out of the buffer in case we need to flush the buffer before it's full
-    double value;           // the sample value used in calculations, to be normalized
-    int32_t normalized = 0;    // sample value after put into signed integer range
-    //int32_t max = INT32_MAX > -(long)INT32_MIN ? -INT32_MIN : INT32_MAX;    // maximum signed integer value used for normalization
-    char byte;                  // holds each individual byte as it's written out Little Endian style
-    unsigned char* pointer = (unsigned char*) &normalized;  // pointer used for breaking up the normalized value into bytes
-
 
     // first generate the header
-    if(!outputstd)
+    if (outputstd == 0)
     {
         int ret = writeHeader(length, fileDescriptor);
 
         if (ret != 0)
         {
-            printf("Failed to write header\n");
-            retval = -1;
+            fprintf(stderr, "Failed to write header: %d\n", ret);
+            retval = 7;
             goto exit;
         }
     }
@@ -273,13 +375,18 @@ int generateSamplesAndOutput(char* filenameInput)
             value = calculateSample(n, (double)n / sampleRate);
 
             // calculate the final signed integer to be output as a sample
-            normalized = value * INT32_MAX; // the magnitude of the max is always one smaller than the magnitude of the min
+
+            // the magnitude of the max is always one smaller than the magnitude of the min
+            normalized = value * INT32_MAX;
+
             // split up the normalized value into individual bytes
             for(int i = 0; i < 4; i++)
             {
                 // get the byte from normalized. pointer points to the adress of the first byte in normalized
                 byte = *(pointer + i);
-                //byte = n * 4 + i;     // labeling the bytes to make sure all is well
+
+                // labeling the bytes to make sure all is well
+                //byte = n * 4 + i;
 
                 // add byte to the buffer
                 buffer[bufferReadyBytes + i] = byte;
@@ -287,35 +394,45 @@ int generateSamplesAndOutput(char* filenameInput)
                 // send to the pipes one byte at a time since they are buffered by the OS
                 putc(byte, aplayStdIn);
 
-                if(!outputstd)
+            #if DEBUG_LEVEL >= 1
+                if (outputstd == 0)
                 {
-                    //putc(byte, hexdumpStdIn);
+                    putc(byte, hexdumpStdIn);
                 }
                 else
                 {
                     putchar(byte);
                 }
+            #else
+                if (outputstd != 0)
+                {
+                    putchar(byte);
+                }
+            #endif
             }
         }
 
         // write the buffer to the file bufferReadyBytes number of bytes, usually a whole buffer full at a time, until the end.
-        if(!outputstd)
+        if (outputstd == 0)
         {
             ssize_t ret = write(fileDescriptor, buffer, bufferReadyBytes);
 
             if (ret < 0)
             {
-                printf("Failed to write output buffer\n");
-                retval = -1;
+                fprintf(stderr, "Failed to write output buffer: %s\n", strerror(errno));
+                retval = 8;
                 goto exit;
             }
         }
     }
 
 exit:
-    if(!outputstd)
+    if (outputstd == 0)
     {
+    #if DEBUG_LEVEL >= 1
         pclose(hexdumpStdIn);
+    #endif
+
         close(fileDescriptor);
     }
 
@@ -324,27 +441,29 @@ exit:
     return retval;
 }
 
+static void usage(const char *filename)
+{
+    fprintf(stderr, "Provide file name as parameter. For example:\n");
+    fprintf(stderr, "  Wrap the file name in quotes:\n");
+    fprintf(stderr, "  ./%s \"file name\"\n", filename);
+    fprintf(stderr, "Will generate a file called \"file name.wav\".\n");
+}
+
 int main(int argc, char** args)
 {
     // extract filename from arguments
-    if(argc == 1)
+    if (argc < 2)
     {
         // or use stdout
-        puts("Provide file name as parameter. For example:");
-        puts("  ./a.out \"file name\"");
-        puts("will generate a file called \"file name.wav\".");
-        return 2;
+        usage(args[0]);
+        return 1;
     }
-    else if(argc > 2)
+    else if (argc > 2)
     {
-        puts("Too many arguments.");
-        puts("Accepts one argument, a file name.");
-        puts("wrap the file name in quotes, like this:");
-        puts("  ./a.out \"file name\"");
-        return 2;
+        fprintf(stderr, "Too many arguments.\n");
+        usage(args[0]);
+        return 1;
     }
 
-    generateSamplesAndOutput(args[1]);
-
-    return 0;
+    return generateSamplesAndOutput(args[1]);
 }

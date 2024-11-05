@@ -15,7 +15,7 @@
 // Debug flag
 #define DEBUG_LEVEL 1
 
-typedef struct
+typedef struct __attribute__((packed))
 {
     union
     {
