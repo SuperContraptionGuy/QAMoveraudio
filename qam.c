@@ -51,9 +51,9 @@ static double WARN_UNUSED simpleQAM(int n, double t)
     // generating offsets in time to test the frame time syncronizer in qamDecoder
     //int phaseOffset = n * 4 * 2 / symbolPeriod / 2000 % 4 * symbolPeriod / 4;
     //int phaseOffset = n * 8 * 2 / symbolPeriod / 2000 % 8 * symbolPeriod / 8;
-    //int phaseOffset = n *  2 / 2000 % symbolPeriod;
+    int phaseOffset = n *  2 / 2000 % symbolPeriod;
     //int phaseOffset = 3 * symbolPeriod / 4 + 1;
-    int phaseOffset = 0;
+    //int phaseOffset = 0;
 
     /*
     // random phase offset
@@ -67,7 +67,7 @@ static double WARN_UNUSED simpleQAM(int n, double t)
     long count = n / symbolPeriod;
     int power = 2;  // log base2 of number of symbols. number of symbols should also be a perfect square
     int symbols = pow(2, power);
-    // int square = sqrt(symbols);
+    int square = sqrt(symbols);
     uint8_t mask = symbols - 1;
     //printf("symbols: %i, square: %i, mask: %x\n", symbols, square, mask);
     count = count & mask;
@@ -79,15 +79,16 @@ static double WARN_UNUSED simpleQAM(int n, double t)
     //double I = count % 2 * 2 - 1;
     //double Q = count % 2 * 2 - 1;
     //double Q = count / 2 * 2 - 1;
-    //double I = count % 2;
+    double I = count % 2;
     //double Q = (count + 1) % 2;
     //double I = 0;
-    //double Q = 0;
+    double Q = 0;
 
     // sequentially hit all the IQ values in order in the constelation defined by power
     //double I = (double)(count % square) / (square - 1) * 2 - 1;
     //double Q = (double)(count / square) / (square - 1) * 2 - 1;
 
+    /*
     // random IQ in constelation defined by power
     static double I = 0;
     static double Q = 0;
@@ -102,6 +103,7 @@ static double WARN_UNUSED simpleQAM(int n, double t)
         I = (double)(rand() % square) / (square - 1) * 2 - 1;
         Q = (double)(rand() % square) / (square - 1) * 2 - 1;
     }
+    */
 
     // variables to enable transition IQ values
     static double decayStartTime = 0;

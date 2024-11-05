@@ -52,12 +52,18 @@ double complex dft(double* buffer, int windowSize, int offset, int k, double* rm
     for(int i = 0; i < windowSize; i++)
     {
         // starts at buffer[offset] and wraps around to the beginning of the buffer
-        bufferIndex = (i + offset + 1) % windowSize;
+        //bufferIndex = (i + offset + 1) % windowSize;
+        bufferIndex = i;
         // phase of the complex exponential
         // phasor offsets the cos and sin waves so that they allign with the time sequence of data in the half overwritten buffer
         phase = (double)i * k / windowSize;
 
         // use a summation over the symbol period to separate orthogonal components (quadrature components) at the single frequency
+        // I think the issue I'm having is that when I offset the fft window, I also phase shift the fft relative to the carrier.
+        // I think I need to keep the phase of the exponential stable under window offset.
+        // the start of the exponential should be at the zero window offset position, not moving relative to the samples. so always
+        // at the buffer index 0.
+        // I think all this means that the buffer index offset doesn not matter at all. Changed bufferIndex to i
         double complex wave = cexp(I*2*M_PI*phase); // generate a sample from the complex exponential
         double complex value = buffer[bufferIndex] * wave;  // multiply the complex exponential by the input sample
         IQ += value;    // integrate the result over the window
