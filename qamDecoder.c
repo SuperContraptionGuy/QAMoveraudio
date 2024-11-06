@@ -10,7 +10,6 @@
 
 // length of each symbol in samples, and so the fft window.
 // This is the period of time all the orthogonal symbols will be integrated over
-#define SYMBOL_PERIOD 64
 
 // Debug flag
 #define DEBUG_LEVEL 2
@@ -115,7 +114,7 @@ double complex dft(double* buffer, int windowSize, int offset, int windowPhase, 
     IQ *= sqrt(1. / windowSize);
 
     // complete the RMS fomula
-    RMS = sqrt(1./SYMBOL_PERIOD * RMS);
+    RMS = sqrt(1./windowSize * RMS);
 
 #if DEBUG_LEVEL > 1
     switch(debugFlag)
@@ -158,7 +157,8 @@ int main(void)
     FILE* eyeDiagramImaginaryStdin = NULL;
 
     // the OFDM channel number, how many cycles per symbol
-    int k = 4;
+#define SYMBOL_PERIOD 32
+    int k = 2;
     sample32_t sample;
 
     // buffer is the length of the symbol period, so that symbols are orthogonal
@@ -385,6 +385,7 @@ int main(void)
         static double complex IQ = 0;   // at ideal sample time
         static double complex IQlast = 0;   // previous ideal sample time
 
+        static double RMSsamples[4] = {0};
         double RMS;
 
         // array storing super sampled IQ values
@@ -402,16 +403,16 @@ int main(void)
         // take a sample right between the ideal samples which are taken at windowPhase
         // if we are half full on the buffer, take an intermidiate IQ sample, for timing sync later
         if(bufferIndex == ((int)floor(windowPhaseReal) + SYMBOL_PERIOD / 2 - 1) % SYMBOL_PERIOD)    // just before real window phase offset midpoint
-            IQsamples[0] = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex + 1, n%SYMBOL_PERIOD, 0., k, &RMS, MIDPOINT, fftDebuggerStdin, n);
+            IQsamples[0] = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex + 1, n%SYMBOL_PERIOD, 0., k, &RMSsamples[0], MIDPOINT, fftDebuggerStdin, n);
 
         if(bufferIndex == ((int)ceil(windowPhaseReal) + SYMBOL_PERIOD / 2 - 1) % SYMBOL_PERIOD)     // just after real window phase offset midpoint;
-            IQsamples[1] = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex + 1, n%SYMBOL_PERIOD, 0., k, &RMS, MIDPOINT, fftDebuggerStdin, n);
+            IQsamples[1] = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex + 1, n%SYMBOL_PERIOD, 0., k, &RMSsamples[1], MIDPOINT, fftDebuggerStdin, n);
 
         if(bufferIndex == ((int)floor(windowPhaseReal) + SYMBOL_PERIOD - 1) % SYMBOL_PERIOD)        // just before real window phase offset
-            IQsamples[2] = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex + 1, n%SYMBOL_PERIOD, 0., k, &RMS, ALLIGNED, fftDebuggerStdin, n);
+            IQsamples[2] = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex + 1, n%SYMBOL_PERIOD, 0., k, &RMSsamples[2], ALLIGNED, fftDebuggerStdin, n);
 
         if(bufferIndex == ((int)ceil(windowPhaseReal) + SYMBOL_PERIOD - 1) % SYMBOL_PERIOD)         // just after real window phase offset
-            IQsamples[3] = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex + 1, n%SYMBOL_PERIOD, 0., k, &RMS, ALLIGNED, fftDebuggerStdin, n);
+            IQsamples[3] = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex + 1, n%SYMBOL_PERIOD, 0., k, &RMSsamples[3], ALLIGNED, fftDebuggerStdin, n);
 
         //if((bufferIndex == (windowPhase + SYMBOL_PERIOD - 1) % SYMBOL_PERIOD) && (n - tookSampleAt > SYMBOL_PERIOD / 2))
         // I added another condition to help debounce. sometimes it takes many samples in a row due to changing window offset
@@ -445,10 +446,16 @@ int main(void)
             // now I'm doing a bunch of stuff that happens every IQ sample. This all happens in the timespan of a single audio sample, which is 1/symbolPeriod of the time between IQ samples that could be used, but whatever
 
             // averaging filter for the equalizer
-            static double rmsaverageWindow[5] = {0};
-            int rmsaverageSize = 5;
+            static double rmsaverageWindow[20] = {0};
+            int rmsaverageSize = 20;
             int rmsaverageIndex = (n / SYMBOL_PERIOD) % rmsaverageSize;
 
+            RMS = 0;
+            for(int i = 0; i < 4; i++)
+            {
+                RMS += RMSsamples[i];
+            }
+            RMS /= 4;
             rmsaverageWindow[rmsaverageIndex] = 1./sqrt(2) - RMS;
             double rmsaverage = 0;
 
@@ -456,15 +463,14 @@ int main(void)
             {
                 rmsaverage += rmsaverageWindow[i];
             }
-
             rmsaverage /= rmsaverageSize;
             //equalizationFactor += (1. / sqrt(2) - RMS) * 5.;
 
             // PID for the equalizer, just proportional. with max
             equalizationFactor = fmax(fmin(equalizationFactor + rmsaverage * 2, 1000), 0);
         #if DEBUG_LEVEL > 0
-            //equalizationFactor = 1;
-            equalizationFactor = 1./0.007;
+            equalizationFactor = 1;     // equalization factor needs to ignore low frequency signals that give DC offset
+            //equalizationFactor = 1./0.007;
         #endif
 
             // try to get a phase lock, symbol time lock, frequency lock, and equalization
@@ -521,10 +527,8 @@ int main(void)
             switch(lockstate)
             {
                 case NO_LOCK:
-                    //P_gain = 2;
-                    P_gain = 0.1;
-                    //I_gain = 0.02;
-                    I_gain = 0;
+                    P_gain = 2;
+                    I_gain = 0.02;
                     D_gain = 0;
                     break;
                 case SYMBOL_LOCK:

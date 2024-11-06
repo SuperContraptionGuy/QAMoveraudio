@@ -45,8 +45,8 @@ typedef struct __attribute__((packed))
 
 static double WARN_UNUSED simpleQAM(int n, double t)
 {
-    int symbolPeriod = 64;
-    int k = 4;      // this is effectively the OFDM channel number, how many cycles per sample period
+    int symbolPeriod = 32;
+    int k = 2;      // this is effectively the OFDM channel number, how many cycles per sample period
     //uint8_t count = t * 100;
 
     // generating offsets in time to test the frame time syncronizer in qamDecoder
