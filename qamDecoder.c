@@ -10,7 +10,7 @@
 
 // length of each symbol in samples, and so the fft window.
 // This is the period of time all the orthogonal symbols will be integrated over
-#define SYMBOL_PERIOD 16
+#define SYMBOL_PERIOD 32
 
 // Debug flag
 #define DEBUG_LEVEL 2
@@ -30,6 +30,13 @@ typedef enum
     MIDPOINT = 1,
     NODEBUG,
 } dft_debug_t;
+
+typedef enum
+{
+    NO_LOCK,
+    SYMBOL_LOCK,
+    PHASE_LOCK,
+} timing_lock_t;
 
 // calculate the discrete fourier transform of an array of real values but only at frequency 'k' (k cycles per windowSize samples)
 //  debugFlag is to print the right debug info for different situations
@@ -62,7 +69,7 @@ double complex dft(double* buffer, int windowSize, int offset, int windowPhase, 
         // That will be corrected for by the carrierPhase parameter by coasta's loop
 
         // starts at buffer[offset] and wraps around to the beginning of the buffer
-        bufferIndex = (i + offset + 1) % windowSize;
+        bufferIndex = (i + offset) % windowSize;
 
         // phase of the complex exponential
         // phasor offsets the cos and sin waves so that their phase is alligned with the real time of the samples, offset by the carrierPhase
@@ -96,7 +103,7 @@ double complex dft(double* buffer, int windowSize, int offset, int windowPhase, 
             {
                 // debug graph outputs
                 // debugging the phase allignment
-                fprintf(debug_fd, "%i %i %f %i %f %i %f\n", debug_n + i, 0, buffer[i], 1, creal(wave), 2, cimag(wave));
+                fprintf(debug_fd, "%i %i %f %i %f %i %f\n", debug_n + i, 0, buffer[bufferIndex], 1, creal(wave), 2, cimag(wave));
                 break;
             }
             case NODEBUG:
@@ -350,7 +357,9 @@ int main(void)
         // recieve data on stdin, signed 32bit integer
 
         // use the windowphase to adjust the buffer index position
-        int bufferIndex = (n + windowPhase)%SYMBOL_PERIOD;
+        //int bufferIndex = (n + windowPhase)%SYMBOL_PERIOD;
+        // Let's not use window phase to adjust index, and just pass the window phase to dft like a sane person
+        int bufferIndex = n % SYMBOL_PERIOD;
 
         for(size_t i = 0; i < sizeof(sample.value); i++)
         {
@@ -364,8 +373,18 @@ int main(void)
 
         fprintf(waveformPlotStdin, "%i %f %f\n", n, sampleBuffer[bufferIndex], equalizationFactor);
 
-        // if we are half full on the buffer, take an intermidiate IQ sample, for timing sync later
-        static double complex IQmidpoint = 0;
+        // all the IQ samples stored in these bins.
+        //      0 - just before ideal midpoint
+        //      1 - just after ideal midpoint
+        //      2 - just before ideal
+        //      3 - just after ideal
+        static double complex IQsamples[4] = {0};
+
+        // interpolated value between two closest actual IQ samples
+        static double complex IQmidpoint = 0;   // between ideal sample times
+        static double complex IQ = 0;   // at ideal sample time
+        static double complex IQlast = 0;   // previous ideal sample time
+
         double RMS;
 
         // array storing super sampled IQ values
@@ -374,34 +393,49 @@ int main(void)
 
     #if DEBUG_LEVEL > 0
         // oversampling IQ values for a nice eye diagram to help debug stuff
-        double complex oversampledIQ = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex, n % SYMBOL_PERIOD, 0., k, &RMS, NODEBUG, NULL, n);
+        double complex oversampledIQ = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex + 1, windowPhase, 0., k, &RMS, NODEBUG, NULL, n);
         fprintf(eyeDiagramRealStdin, "%f %i %f\n", fmod((double)n / SYMBOL_PERIOD, 4), n / 4 / SYMBOL_PERIOD, creal(oversampledIQ));
         fprintf(eyeDiagramImaginaryStdin, "%f %i %f\n", fmod((double)n / SYMBOL_PERIOD, 4), n / 4 / SYMBOL_PERIOD, cimag(oversampledIQ));
     #endif
 
-        if((bufferIndex == SYMBOL_PERIOD / 2 - 1) && (n - tookSampleAt > 1))
-        {
-            IQmidpoint = 0;
+        //if((bufferIndex == SYMBOL_PERIOD / 2 - 1) && (n - tookSampleAt > 1))
+        // take a sample right between the ideal samples which are taken at windowPhase
+        // if we are half full on the buffer, take an intermidiate IQ sample, for timing sync later
+        if(bufferIndex == ((int)floor(windowPhaseReal) + SYMBOL_PERIOD / 2 - 1) % SYMBOL_PERIOD)    // just before real window phase offset midpoint
+            IQsamples[0] = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex + 1, n%SYMBOL_PERIOD, 0., k, &RMS, MIDPOINT, fftDebuggerStdin, n);
 
-            // compute DFT half way between symbols (if time is already synced, otherwise it will help sync the time)
-            IQmidpoint = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex, n % SYMBOL_PERIOD, 0., k, &RMS, MIDPOINT, fftDebuggerStdin, n);
+        if(bufferIndex == ((int)ceil(windowPhaseReal) + SYMBOL_PERIOD / 2 - 1) % SYMBOL_PERIOD)     // just after real window phase offset midpoint
+            IQsamples[1] = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex + 1, n%SYMBOL_PERIOD, 0., k, &RMS, MIDPOINT, fftDebuggerStdin, n);
 
-        }
+        if(bufferIndex == ((int)floor(windowPhaseReal) + SYMBOL_PERIOD - 1) % SYMBOL_PERIOD)        // just before real window phase offset
+            IQsamples[2] = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex + 1, n%SYMBOL_PERIOD, 0., k, &RMS, ALLIGNED, fftDebuggerStdin, n);
 
-        // if the window buffer is filled, ie, we're on the last index of the buffer
+        if(bufferIndex == ((int)ceil(windowPhaseReal) + SYMBOL_PERIOD - 1) % SYMBOL_PERIOD)         // just after real window phase offset
+            IQsamples[3] = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex + 1, n%SYMBOL_PERIOD, 0., k, &RMS, ALLIGNED, fftDebuggerStdin, n);
+
+        //if((bufferIndex == (windowPhase + SYMBOL_PERIOD - 1) % SYMBOL_PERIOD) && (n - tookSampleAt > SYMBOL_PERIOD / 2))
         // I added another condition to help debounce. sometimes it takes many samples in a row due to changing window offset
-        static double complex IQ = 0;
-        static double complex IQlast = 0;
-
-        if((bufferIndex == SYMBOL_PERIOD - 1) && (n - tookSampleAt > SYMBOL_PERIOD / 2))
+        if((bufferIndex == ((int)ceil(windowPhaseReal) + SYMBOL_PERIOD - 1) % SYMBOL_PERIOD) && (n - tookSampleAt > SYMBOL_PERIOD / 2))  // just after real window phase offset, do the calculations that must be done once per symbol recieved
         {
-            tookSampleAt = n;
-            IQlast = IQ;
-            IQ = 0;
-
             // compute DFT (rn just one freq, but when we implement OFDM, then at many harmonic(orthogonal) frequencies)
-            IQ = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex, n % SYMBOL_PERIOD, 0., k, &RMS, ALLIGNED, fftDebuggerStdin, n);
+            //IQ = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex + 1, windowPhase, 0., k, &RMS, ALLIGNED, fftDebuggerStdin, n);
             // throwing away the last RMS value from MIDPOINT calculation, which is probably a shame and a waste
+
+            // interpolate IQ and IQmidpoint from actual IQ samples in IQsamples
+            // just doing linear interpolation
+            //      (slope) * interp_X + initial
+            //      (final - initial) * interp_X + initial
+            /*
+            IQmidpoint =    (IQsamples[1] - IQsamples[0]) * fmod(windowPhaseReal, 1) + IQsamples[0];
+            IQlast =        IQ;
+            IQ =            (IQsamples[3] - IQsamples[2]) * fmod(windowPhaseReal, 1) + IQsamples[2];
+            */
+
+            IQlast = IQ;
+            IQ = IQsamples[2];
+            IQmidpoint = IQsamples[0];
+
+            tookSampleAt = n;
             
 
             // now I'm doing a bunch of stuff that happens every IQ sample. This all happens in the timespan of a single audio sample, which is 1/symbolPeriod of the time between IQ samples that could be used, but whatever
@@ -425,7 +459,7 @@ int main(void)
             // PID for the equalizer, just proportional. with max
             equalizationFactor = fmax(fmin(equalizationFactor + rmsaverage * 2, 1000), 0);
         #if DEBUG_LEVEL > 0
-            equalizationFactor = 1;
+            //equalizationFactor = 1;
         #endif
 
             // try to get a phase lock, symbol time lock, frequency lock, and equalization
@@ -438,25 +472,62 @@ int main(void)
             fprintf(fftDebuggerStdin, "%i %i %f %i %f\n", n, 10, phaseOffsetEstimate + 2, 15, (double)(n % SYMBOL_PERIOD) / SYMBOL_PERIOD + 2);
         #endif
 
+            static timing_lock_t lockstate = NO_LOCK;
+
             // Process Variable (PV, ie phase estimate) filter
             // rolling average of phase offset estimate
             // this may need to be adjusted based on the state of symbol and phase lock achieved
-            static double averageWindow[8] = {0};
-            int averageSize = 8;
-            int averageIndex = (n / SYMBOL_PERIOD) % averageSize;
-
-            averageWindow[averageIndex] = phaseOffsetEstimate;
-
-            double average = 0;
-
-            for(int i = 0; i < averageSize; i++)
+            static double averageWindow[64] = {0};
+            const int averageWindowArrayLength = 64;
+            static int averageSize;    // adjusted based on lock state
+            int averageIndex = (n / SYMBOL_PERIOD) % averageWindowArrayLength;
+            switch(lockstate)
             {
-                average += averageWindow[i];
+                case NO_LOCK:
+                    // smaller averaging window to achieve
+                    //  faster error signal response
+                    //  for more aggressive PID tune
+                    averageSize = 2;
+                    break;
+                case SYMBOL_LOCK:
+                case PHASE_LOCK:
+                    // longer average window to help average out symbol transitions that are not zero crossings
+                    //  PID tune must be shittier
+                    averageSize = 64;
+                    break;
             }
 
+            // add a sample and take the average of last averageSize samples
+            averageWindow[averageIndex] = phaseOffsetEstimate;
+            double average = 0;
+            // step backwards from current index to averageSize indexed back
+            for(int i = averageIndex; i > averageIndex - averageSize; i--)
+            {
+                if(i < 0)
+                    average += averageWindow[averageWindowArrayLength + i];
+                average += averageWindow[i];
+            }
             average /= averageSize;
 
-            // PID loop
+            // PID loop for symbol timing, ie aligning the fft window to the symbol transitions
+            static double P_gain;
+            static double I_gain;
+            static double D_gain;
+            switch(lockstate)
+            {
+                case NO_LOCK:
+                    P_gain = 2;
+                    I_gain = 0.02;
+                    D_gain = 0;
+                    break;
+                case SYMBOL_LOCK:
+                case PHASE_LOCK:
+                    P_gain = 0.1;
+                    I_gain = 0.001;
+                    D_gain = 0;
+                    break;
+            }
+
             double error = 0 - average;
             static double errorIntegral = 0;
             errorIntegral += error;
@@ -466,9 +537,7 @@ int main(void)
             lastError = error;
 
             // this may need to be adjusted based on the state of symbol and phase lock achieved
-            //double phaseAdjustment = (errorDerivative * -1.0 + errorIntegral * 0.0 + error * 6.0) * 1;
-            //double phaseAdjustment = (errorDerivative * 0.0 + errorIntegral * 0.00 + error * 0.1) * 1;
-            double phaseAdjustment = (errorDerivative * 0.0 + errorIntegral * 0.010 + error * 1.00) * 1;
+            double phaseAdjustment = errorDerivative * D_gain + errorIntegral * I_gain + error * P_gain;
 
             windowPhaseReal += phaseAdjustment;
             //windowPhaseReal = fmod(windowPhaseReal + phaseAdjustment, SYMBOL_PERIOD);
@@ -481,7 +550,8 @@ int main(void)
             //windowPhase = (n * 2 / 2000) % SYMBOL_PERIOD;
             //windowPhase = (n * 4 * 2/ (SYMBOL_PERIOD * 2000) ) % 4 * SYMBOL_PERIOD / 4;
             //windowPhase = SYMBOL_PERIOD / 4;
-            //windowPhase = 0;
+            windowPhase = 0;
+            windowPhaseReal = 0;
             //windowPhase = (int)((windowPhase + phaseAdjustment) < 0 ? (SYMBOL_PERIOD - windowPhase + phaseAdjustment) : (windowPhase + phaseAdjustment)) % SYMBOL_PERIOD;
         #endif
 
