@@ -10,7 +10,7 @@
 
 // length of each symbol in samples, and so the fft window.
 // This is the period of time all the orthogonal symbols will be integrated over
-#define SYMBOL_PERIOD 32
+#define SYMBOL_PERIOD 64
 
 // Debug flag
 #define DEBUG_LEVEL 2
@@ -158,7 +158,7 @@ int main(void)
     FILE* eyeDiagramImaginaryStdin = NULL;
 
     // the OFDM channel number, how many cycles per symbol
-    int k = 1;
+    int k = 4;
     sample32_t sample;
 
     // buffer is the length of the symbol period, so that symbols are orthogonal
@@ -393,7 +393,7 @@ int main(void)
 
     #if DEBUG_LEVEL > 0
         // oversampling IQ values for a nice eye diagram to help debug stuff
-        double complex oversampledIQ = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex + 1, windowPhase, 0., k, &RMS, NODEBUG, NULL, n);
+        double complex oversampledIQ = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex + 1, n%SYMBOL_PERIOD, 0., k, &RMS, NODEBUG, NULL, n);
         fprintf(eyeDiagramRealStdin, "%f %i %f\n", fmod((double)n / SYMBOL_PERIOD, 4), n / 4 / SYMBOL_PERIOD, creal(oversampledIQ));
         fprintf(eyeDiagramImaginaryStdin, "%f %i %f\n", fmod((double)n / SYMBOL_PERIOD, 4), n / 4 / SYMBOL_PERIOD, cimag(oversampledIQ));
     #endif
@@ -404,7 +404,7 @@ int main(void)
         if(bufferIndex == ((int)floor(windowPhaseReal) + SYMBOL_PERIOD / 2 - 1) % SYMBOL_PERIOD)    // just before real window phase offset midpoint
             IQsamples[0] = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex + 1, n%SYMBOL_PERIOD, 0., k, &RMS, MIDPOINT, fftDebuggerStdin, n);
 
-        if(bufferIndex == ((int)ceil(windowPhaseReal) + SYMBOL_PERIOD / 2 - 1) % SYMBOL_PERIOD)     // just after real window phase offset midpoint
+        if(bufferIndex == ((int)ceil(windowPhaseReal) + SYMBOL_PERIOD / 2 - 1) % SYMBOL_PERIOD)     // just after real window phase offset midpoint;
             IQsamples[1] = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex + 1, n%SYMBOL_PERIOD, 0., k, &RMS, MIDPOINT, fftDebuggerStdin, n);
 
         if(bufferIndex == ((int)floor(windowPhaseReal) + SYMBOL_PERIOD - 1) % SYMBOL_PERIOD)        // just before real window phase offset
@@ -425,15 +425,19 @@ int main(void)
             // just doing linear interpolation
             //      (slope) * interp_X + initial
             //      (final - initial) * interp_X + initial
-            /*
             IQmidpoint =    (IQsamples[1] - IQsamples[0]) * fmod(windowPhaseReal, 1) + IQsamples[0];
             IQlast =        IQ;
             IQ =            (IQsamples[3] - IQsamples[2]) * fmod(windowPhaseReal, 1) + IQsamples[2];
-            */
 
+            /*
             IQlast = IQ;
             IQ = IQsamples[2];
             IQmidpoint = IQsamples[0];
+            */
+            
+            //IQlast = 0;
+            //IQ = 0;
+            //IQmidpoint = 0;
 
             tookSampleAt = n;
             
@@ -460,13 +464,14 @@ int main(void)
             equalizationFactor = fmax(fmin(equalizationFactor + rmsaverage * 2, 1000), 0);
         #if DEBUG_LEVEL > 0
             //equalizationFactor = 1;
+            equalizationFactor = 1./0.007;
         #endif
 
             // try to get a phase lock, symbol time lock, frequency lock, and equalization
             // calculate the error signal
             // Gardner Algorithm: Real Part( derivitive of IQ times conjugate of IQ)
             // basically, it's trying to estimate the error of zero crossings
-            double phaseOffsetEstimate = -creal((IQ - IQlast) * conj(IQmidpoint));
+            double phaseOffsetEstimate = creal((IQ - IQlast) * conj(IQmidpoint));
 
         #if DEBUG_LEVEL > 1
             fprintf(fftDebuggerStdin, "%i %i %f %i %f\n", n, 10, phaseOffsetEstimate + 2, 15, (double)(n % SYMBOL_PERIOD) / SYMBOL_PERIOD + 2);
@@ -516,8 +521,10 @@ int main(void)
             switch(lockstate)
             {
                 case NO_LOCK:
-                    P_gain = 2;
-                    I_gain = 0.02;
+                    //P_gain = 2;
+                    P_gain = 0.1;
+                    //I_gain = 0.02;
+                    I_gain = 0;
                     D_gain = 0;
                     break;
                 case SYMBOL_LOCK:
@@ -529,6 +536,7 @@ int main(void)
             }
 
             double error = 0 - average;
+            //error *= -1;
             static double errorIntegral = 0;
             errorIntegral += error;
 
@@ -540,18 +548,17 @@ int main(void)
             double phaseAdjustment = errorDerivative * D_gain + errorIntegral * I_gain + error * P_gain;
 
             windowPhaseReal += phaseAdjustment;
-            //windowPhaseReal = fmod(windowPhaseReal + phaseAdjustment, SYMBOL_PERIOD);
-            //windowPhaseReal = windowPhaseReal < 0 ? SYMBOL_PERIOD + windowPhaseReal : windowPhaseReal;
-            //windowPhase = (int)round(windowPhaseReal) % SYMBOL_PERIOD;
+            windowPhaseReal = fmod(windowPhaseReal + phaseAdjustment, SYMBOL_PERIOD);
+            windowPhaseReal = windowPhaseReal < 0 ? SYMBOL_PERIOD + windowPhaseReal : windowPhaseReal;
             windowPhase = (int)round(windowPhaseReal) % SYMBOL_PERIOD; // quantize the real window phase
-            windowPhase = windowPhase < 0 ? SYMBOL_PERIOD + windowPhase : windowPhase;
+            //windowPhase = windowPhase < 0 ? SYMBOL_PERIOD + windowPhase : windowPhase;
         #if DEBUG_LEVEL > 0
             // some options to overwrite the window phase given by the PID controller
             //windowPhase = (n * 2 / 2000) % SYMBOL_PERIOD;
             //windowPhase = (n * 4 * 2/ (SYMBOL_PERIOD * 2000) ) % 4 * SYMBOL_PERIOD / 4;
             //windowPhase = SYMBOL_PERIOD / 4;
-            windowPhase = 0;
-            windowPhaseReal = 0;
+            //windowPhase = 0;
+            //windowPhaseReal = 0.1;
             //windowPhase = (int)((windowPhase + phaseAdjustment) < 0 ? (SYMBOL_PERIOD - windowPhase + phaseAdjustment) : (windowPhase + phaseAdjustment)) % SYMBOL_PERIOD;
         #endif
 
