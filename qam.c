@@ -8,6 +8,7 @@
 #include <math.h>
 #include <string.h>
 #include <errno.h>
+#include <time.h>
 
 #define WARN_UNUSED __attribute__((warn_unused_result))
 
@@ -44,23 +45,21 @@ typedef struct __attribute__((packed))
 
 static double WARN_UNUSED simpleQAM(int n, double t)
 {
-    int symbolPeriod = 64;
-    int k = 4;      // this is effectively the OFDM channel number, how many cycles per sample period
+    int symbolPeriod = 16;
+    int k = 1;      // this is effectively the OFDM channel number, how many cycles per sample period
     //uint8_t count = t * 100;
 
     // generating offsets in time to test the frame time syncronizer in qamDecoder
     //int phaseOffset = n * 4 * 2 / symbolPeriod / 2000 % 4 * symbolPeriod / 4;
     //int phaseOffset = n * 8 * 2 / symbolPeriod / 2000 % 8 * symbolPeriod / 8;
-    int phaseOffset = n *  2 / 2000 % symbolPeriod;
+    //int phaseOffset = n *  2 / 2000 % symbolPeriod;
     //int phaseOffset = 3 * symbolPeriod / 4 + 1;
     //int phaseOffset = 0;
 
-    /*
     // random phase offset
     static int phaseOffset = -1;
     if (phaseOffset == -1)
         phaseOffset = rand() % symbolPeriod;
-        */
 
     n += phaseOffset;
 
@@ -79,16 +78,13 @@ static double WARN_UNUSED simpleQAM(int n, double t)
     //double I = count % 2 * 2 - 1;
     //double Q = count % 2 * 2 - 1;
     //double Q = count / 2 * 2 - 1;
-    double I = count % 2;
-    //double Q = (count + 1) % 2;
     //double I = 0;
-    double Q = 0;
+    //double Q = 0;
 
     // sequentially hit all the IQ values in order in the constelation defined by power
     //double I = (double)(count % square) / (square - 1) * 2 - 1;
     //double Q = (double)(count / square) / (square - 1) * 2 - 1;
 
-    /*
     // random IQ in constelation defined by power
     static double I = 0;
     static double Q = 0;
@@ -100,10 +96,10 @@ static double WARN_UNUSED simpleQAM(int n, double t)
         // then start sending random data
         //I = ((double)(rand() % 2) * 2 - 1) / 1;
         //Q = ((double)(rand() % 2) * 2 - 1) / 1;
+
         I = (double)(rand() % square) / (square - 1) * 2 - 1;
         Q = (double)(rand() % square) / (square - 1) * 2 - 1;
     }
-    */
 
     // variables to enable transition IQ values
     static double decayStartTime = 0;
@@ -368,6 +364,8 @@ static int WARN_UNUSED generateSamplesAndOutput(char* filenameInput)
     }
 
     // calculate all the samples
+    // seed the random number generator
+    srand(time(NULL));
     while(n < length)
     {
         // calculate a chunk of samples until the buffer is full or max is reached. one sample at a time, 4 bytes at a time

@@ -10,10 +10,10 @@
 
 // length of each symbol in samples, and so the fft window.
 // This is the period of time all the orthogonal symbols will be integrated over
-#define SYMBOL_PERIOD 64
+#define SYMBOL_PERIOD 16
 
 // Debug flag
-#define DEBUG_LEVEL 1
+#define DEBUG_LEVEL 2
 
 typedef struct __attribute__((packed))
 {
@@ -33,7 +33,10 @@ typedef enum
 
 // calculate the discrete fourier transform of an array of real values but only at frequency 'k' (k cycles per windowSize samples)
 //  debugFlag is to print the right debug info for different situations
-double complex dft(double* buffer, int windowSize, int offset, int k, double* rmsOut, dft_debug_t debugFlag, FILE* debug_fd, int debug_n)
+//  offset is the starting position of the window in the buffer
+//  windowPhase is the offset in time the window is from the start of the audio samples, probably modulo the symbol period
+//  carrierPhase is the phase offset of the carrier relative to the windowPhase
+double complex dft(double* buffer, int windowSize, int offset, int windowPhase, double carrierPhase, int k, double* rmsOut, dft_debug_t debugFlag, FILE* debug_fd, int debug_n)
 {
 #if DEBUG_LEVEL <= 1
     (void)debugFlag;
@@ -48,39 +51,42 @@ double complex dft(double* buffer, int windowSize, int offset, int k, double* rm
 
     int bufferIndex;
     double phase;
+    int n;  // the sample number since start of audio recording modulo window size
 
     for(int i = 0; i < windowSize; i++)
     {
+        // recovering the time of each sample relative to the real time modulo symbol period.
+        // this is important for having a consistant carrier phase between DFTs
+        n = i + windowPhase;
+        // This does mean there will be a constant phase misalignment between the original carrier and the IQ demod exponential, so IQ will be rotated.
+        // That will be corrected for by the carrierPhase parameter by coasta's loop
+
         // starts at buffer[offset] and wraps around to the beginning of the buffer
-        //bufferIndex = (i + offset + 1) % windowSize;
-        bufferIndex = i;
+        bufferIndex = (i + offset + 1) % windowSize;
+
         // phase of the complex exponential
-        // phasor offsets the cos and sin waves so that they allign with the time sequence of data in the half overwritten buffer
-        phase = (double)i * k / windowSize;
+        // phasor offsets the cos and sin waves so that their phase is alligned with the real time of the samples, offset by the carrierPhase
+        phase = (double)(n) * k / windowSize + carrierPhase;
 
         // use a summation over the symbol period to separate orthogonal components (quadrature components) at the single frequency
-        // I think the issue I'm having is that when I offset the fft window, I also phase shift the fft relative to the carrier.
-        // I think I need to keep the phase of the exponential stable under window offset.
-        // the start of the exponential should be at the zero window offset position, not moving relative to the samples. so always
-        // at the buffer index 0.
-        // I think all this means that the buffer index offset doesn not matter at all. Changed bufferIndex to i
         double complex wave = cexp(I*2*M_PI*phase); // generate a sample from the complex exponential
         double complex value = buffer[bufferIndex] * wave;  // multiply the complex exponential by the input sample
         IQ += value;    // integrate the result over the window
 
-        // compute RMS amplitude for equalization
+        // compute RMS amplitude for equalization -- this kinda sucks. if there is a DC bias (ie, some low frequency interference)
+        // it also comes through on RMS. Gotta fix that
         RMS += pow(buffer[i], 2);
 
 
         // this debug define simplifies the function a bit if debugging is disabled
-    #if DEBUG_LEVEL == 1
+    #if DEBUG_LEVEL > 1
         switch(debugFlag)
         {
             case MIDPOINT:
             {
                 // debug graph outputs
                 // debugging the phase allignment
-                //fprintf(debug_fd, "%i %i %f %i %f %i %f\n", debug_n + i, 5, buffer[bufferIndex] + 4, 6, creal(wave) + 4, 7, cimag(wave) + 4);
+                fprintf(debug_fd, "%i %i %f %i %f %i %f\n", debug_n + i, 5, buffer[bufferIndex] + 4, 6, creal(wave) + 4, 7, cimag(wave) + 4);
                 // debugging the integral
                 //fprintf(debug_fd, "%i %i %f %i %f %i %f %i %f\n", debug_n + i, 11, creal(value) + 6, 12, cimag(value) + 6, 13, creal(IQ) + 6, 14, cimag(IQ) + 6);
                 break;
@@ -90,9 +96,11 @@ double complex dft(double* buffer, int windowSize, int offset, int k, double* rm
             {
                 // debug graph outputs
                 // debugging the phase allignment
-                //fprintf(debug_fd, "%i %i %f %i %f %i %f\n", debug_n + i, 0, buffer[i], 1, creal(wave), 2, cimag(wave));
+                fprintf(debug_fd, "%i %i %f %i %f %i %f\n", debug_n + i, 0, buffer[i], 1, creal(wave), 2, cimag(wave));
                 break;
             }
+            case NODEBUG:
+                break;
         }
     #endif
     }
@@ -102,14 +110,14 @@ double complex dft(double* buffer, int windowSize, int offset, int k, double* rm
     // complete the RMS fomula
     RMS = sqrt(1./SYMBOL_PERIOD * RMS);
 
-#if DEBUG_LEVEL == 1
+#if DEBUG_LEVEL > 1
     switch(debugFlag)
     {
         case MIDPOINT:
         {
             // debug fft plot
             fprintf(debug_fd, "%i %i %f %i %f\n", debug_n, 8, creal(IQ) + 4, 9, cimag(IQ) + 4);
-            fprintf(debug_fd, "%f %i %f %i %f\n", debug_n + windowSize - 0.01, 8, creal(IQ) + 4, 9, cimag(IQ) + 4);
+            fprintf(debug_fd, "%i %i %f %i %f\n", debug_n + windowSize, 8, creal(IQ) + 4, 9, cimag(IQ) + 4);
             break;
         }
 
@@ -117,9 +125,11 @@ double complex dft(double* buffer, int windowSize, int offset, int k, double* rm
         {
             // debug fft plot
             fprintf(debug_fd, "%i %i %f %i %f\n", debug_n, 3, creal(IQ), 4, cimag(IQ));
-            fprintf(debug_fd, "%f %i %f %i %f\n", debug_n + windowSize - 0.01, 3, creal(IQ), 4, cimag(IQ));
+            fprintf(debug_fd, "%i %i %f %i %f\n", debug_n + windowSize, 3, creal(IQ), 4, cimag(IQ));
             break;
         }
+        case NODEBUG:
+            break;
     }
 #endif
 
@@ -141,7 +151,7 @@ int main(void)
     FILE* eyeDiagramImaginaryStdin = NULL;
 
     // the OFDM channel number, how many cycles per symbol
-    int k = 4;
+    int k = 1;
     sample32_t sample;
 
     // buffer is the length of the symbol period, so that symbols are orthogonal
@@ -193,11 +203,12 @@ int main(void)
         "--legend 7 \"fft imaginary mid\" "
         "--legend 8 \"I decision mid\" "
         "--legend 9 \"Q decision mid\" "
-        "--legend 10 \"phase error signal\" "
         "--legend 11 \"samp*real\" "
         "--legend 12 \"samp*imag\" "
         "--legend 13 \"integral real\" "
         "--legend 14 \"integral imag\" "
+        "--legend 10 \"phase error signal\" "
+        "--legend 15 \"window phase\" "
     ;
 
     // using it to plot the time domain signal
@@ -363,7 +374,7 @@ int main(void)
 
     #if DEBUG_LEVEL > 0
         // oversampling IQ values for a nice eye diagram to help debug stuff
-        double complex oversampledIQ = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex, k, &RMS, NODEBUG, NULL, n);
+        double complex oversampledIQ = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex, n % SYMBOL_PERIOD, 0., k, &RMS, NODEBUG, NULL, n);
         fprintf(eyeDiagramRealStdin, "%f %i %f\n", fmod((double)n / SYMBOL_PERIOD, 4), n / 4 / SYMBOL_PERIOD, creal(oversampledIQ));
         fprintf(eyeDiagramImaginaryStdin, "%f %i %f\n", fmod((double)n / SYMBOL_PERIOD, 4), n / 4 / SYMBOL_PERIOD, cimag(oversampledIQ));
     #endif
@@ -373,7 +384,7 @@ int main(void)
             IQmidpoint = 0;
 
             // compute DFT half way between symbols (if time is already synced, otherwise it will help sync the time)
-            IQmidpoint = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex, k, &RMS, MIDPOINT, fftDebuggerStdin, n);
+            IQmidpoint = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex, n % SYMBOL_PERIOD, 0., k, &RMS, MIDPOINT, fftDebuggerStdin, n);
 
         }
 
@@ -389,7 +400,7 @@ int main(void)
             IQ = 0;
 
             // compute DFT (rn just one freq, but when we implement OFDM, then at many harmonic(orthogonal) frequencies)
-            IQ = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex, k, &RMS, ALLIGNED, fftDebuggerStdin, n);
+            IQ = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex, n % SYMBOL_PERIOD, 0., k, &RMS, ALLIGNED, fftDebuggerStdin, n);
             // throwing away the last RMS value from MIDPOINT calculation, which is probably a shame and a waste
             
 
@@ -413,20 +424,25 @@ int main(void)
 
             // PID for the equalizer, just proportional. with max
             equalizationFactor = fmax(fmin(equalizationFactor + rmsaverage * 2, 1000), 0);
+        #if DEBUG_LEVEL > 0
+            equalizationFactor = 1;
+        #endif
 
             // try to get a phase lock, symbol time lock, frequency lock, and equalization
             // calculate the error signal
             // Gardner Algorithm: Real Part( derivitive of IQ times conjugate of IQ)
             // basically, it's trying to estimate the error of zero crossings
             double phaseOffsetEstimate = -creal((IQ - IQlast) * conj(IQmidpoint));
-            double phaseOffsetComplex = -cimag((IQ - IQlast) * conj(IQmidpoint));
 
-            fprintf(fftDebuggerStdin, "%i %i %f %i %f\n", n, 10, phaseOffsetEstimate, 15, phaseOffsetComplex);
+        #if DEBUG_LEVEL > 1
+            fprintf(fftDebuggerStdin, "%i %i %f %i %f\n", n, 10, phaseOffsetEstimate + 2, 15, (double)(n % SYMBOL_PERIOD) / SYMBOL_PERIOD + 2);
+        #endif
 
             // Process Variable (PV, ie phase estimate) filter
             // rolling average of phase offset estimate
-            static double averageWindow[40] = {0};
-            int averageSize = 40;
+            // this may need to be adjusted based on the state of symbol and phase lock achieved
+            static double averageWindow[8] = {0};
+            int averageSize = 8;
             int averageIndex = (n / SYMBOL_PERIOD) % averageSize;
 
             averageWindow[averageIndex] = phaseOffsetEstimate;
@@ -449,9 +465,10 @@ int main(void)
             double errorDerivative = error - lastError;
             lastError = error;
 
+            // this may need to be adjusted based on the state of symbol and phase lock achieved
             //double phaseAdjustment = (errorDerivative * -1.0 + errorIntegral * 0.0 + error * 6.0) * 1;
             //double phaseAdjustment = (errorDerivative * 0.0 + errorIntegral * 0.00 + error * 0.1) * 1;
-            double phaseAdjustment = (errorDerivative * 0.1 + errorIntegral * 0.010 + error * 0.5) * 1;
+            double phaseAdjustment = (errorDerivative * 0.0 + errorIntegral * 0.010 + error * 1.00) * 1;
 
             windowPhaseReal += phaseAdjustment;
             //windowPhaseReal = fmod(windowPhaseReal + phaseAdjustment, SYMBOL_PERIOD);
@@ -464,7 +481,7 @@ int main(void)
             //windowPhase = (n * 2 / 2000) % SYMBOL_PERIOD;
             //windowPhase = (n * 4 * 2/ (SYMBOL_PERIOD * 2000) ) % 4 * SYMBOL_PERIOD / 4;
             //windowPhase = SYMBOL_PERIOD / 4;
-            windowPhase = 0;
+            //windowPhase = 0;
             //windowPhase = (int)((windowPhase + phaseAdjustment) < 0 ? (SYMBOL_PERIOD - windowPhase + phaseAdjustment) : (windowPhase + phaseAdjustment)) % SYMBOL_PERIOD;
         #endif
 
