@@ -446,8 +446,8 @@ int main(void)
             // now I'm doing a bunch of stuff that happens every IQ sample. This all happens in the timespan of a single audio sample, which is 1/symbolPeriod of the time between IQ samples that could be used, but whatever
 
             // averaging filter for the equalizer
-            static double rmsaverageWindow[20] = {0};
-            int rmsaverageSize = 20;
+            static double rmsaverageWindow[50] = {0};
+            int rmsaverageSize = 50;
             int rmsaverageIndex = (n / SYMBOL_PERIOD) % rmsaverageSize;
 
             RMS = 0;
