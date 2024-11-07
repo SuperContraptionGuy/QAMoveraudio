@@ -128,8 +128,8 @@ static double WARN_UNUSED simpleQAM(int n, double t)
         Q = (Q - decayStartQ) / decayTime * (t - decayStartTime) + decayStartQ;
     }
 
-    double totalAmplitude = 0.01;
-    //double totalAmplitude = 1;
+    // double totalAmplitude = 0.01;
+    double totalAmplitude = 1.0;
     double randomness = 0.1;
     double randI = ((double)rand() / RAND_MAX * 2 - 1) * randomness;
     double randQ = ((double)rand() / RAND_MAX * 2 - 1) * randomness;
