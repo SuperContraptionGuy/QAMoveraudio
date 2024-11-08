@@ -83,43 +83,19 @@ iqsample_t randomQAM_withPreamble(int symbolIndex, int square)
     return sample;
 }
 
-static double WARN_UNUSED simpleQAM(int n, double t)
+iqsample_t sequentialIQ(int symbolIndex, int square)
 {
-    int symbolPeriod = 256;
-    //int guardPeriod = 4./1000 * 44100;     // I've found that the echos in a room last for about 3ms, durring that period, the symbol is phase offset and otherwise changed due to the last symbol and the transition between symbols
-    int guardPeriod = 0;    // have to disable for QAM, ie, set to 0, instead use a raised cosine filter for ISI combat
-    int totalPeriod = symbolPeriod + guardPeriod;
-    int k = 16;      // this is effectively the OFDM channel number, how many cycles per sample period
+    iqsample_t symbol;
+    // sequentially hit all the IQ values in order in the constelation defined by power
+    symbol.I = (double)(symbolIndex % square) / (square - 1) * 2 - 1;
+    symbol.Q = (double)(symbolIndex / square) / (square - 1) * 2 - 1;
+    return symbol;
+}
 
-    int filterPeriod = symbolPeriod * 5 * 2 + 1;    // filter lookahead and lookbehind
-    //iqsample_t *samples = malloc(sizeof(iqsample_t) * filterPeriod);
-    iqsample_t sample;
-    //iqsample_t sample = {0, 0}; // the iq sample to generate
-    //uint8_t count = t * 100;
-
-    // generating offsets in time to test the frame time syncronizer in qamDecoder
-    //int phaseOffset = n * 4 * 2 / symbolPeriod / 2000 % 4 * symbolPeriod / 4;
-    //int phaseOffset = n * 8 * 2 / symbolPeriod / 2000 % 8 * symbolPeriod / 8;
-    //int phaseOffset = n *  2 / 2000 % symbolPeriod;
-    //int phaseOffset = 3 * symbolPeriod / 4 + 1;
-    //int phaseOffset = 0;
-
-    // random phase offset
-    static int phaseOffset = -1;
-    if (phaseOffset == -1)
-        phaseOffset = rand() % symbolPeriod;
-
-    n += phaseOffset;
-    int symbolIndex = n / totalPeriod;
-
-    // random IQ in constelation defined by power
-    long count = n / symbolPeriod;
-    int power = 2;  // log base2 of number of symbols. number of symbols should also be a perfect square
-    int symbols = pow(2, power);
-    int square = sqrt(symbols);
-
-    double audioSample; // the final audio sample
-
+/*
+double raisedCosQAM(int n)
+{
+    // TODO ok, this is broken, and slow as hell. I should instead generate all the filtered IQ data ahead of time, then sample it to generate the waveform in real time
     // grab enough IQ samples to cover the filter temporal width
     for(int i = 0; i < filterPeriod; i++)
     {
@@ -163,26 +139,64 @@ static double WARN_UNUSED simpleQAM(int n, double t)
             (sample.Q + randQ) * sin(2.0 * M_PI * symbolStep * k / symbolPeriod) * filter
         ) / 2.0 * sqrt(2.0) * totalAmplitude;
     }
-    //sample = alternateI(symbolIndex);
+    return 0;
+}
+*/
 
-    // determine the I and Q
-    //double I = count % 2 * 2 - 1;
-    //double Q = count % 2 * 2 - 1;
-    //double Q = count / 2 * 2 - 1;
-    //double I = 0;
-    //double Q = 0;
+static double WARN_UNUSED simpleQAM(int n, double t)
+{
+    int symbolPeriod = 256;
+    //int guardPeriod = 4./1000 * 44100;     // I've found that the echos in a room last for about 3ms, durring that period, the symbol is phase offset and otherwise changed due to the last symbol and the transition between symbols
+    int guardPeriod = 0;    // have to disable for QAM, ie, set to 0, instead use a raised cosine filter for ISI combat
+    int totalPeriod = symbolPeriod + guardPeriod;
+    int k = 16;      // this is effectively the OFDM channel number, how many cycles per sample period
 
-    // sequentially hit all the IQ values in order in the constelation defined by power
-    //double I = (double)(count % square) / (square - 1) * 2 - 1;
-    //double Q = (double)(count / square) / (square - 1) * 2 - 1;
+    // generating offsets in time to test the frame time syncronizer in qamDecoder
+    // phase offset that cycles through sequentially all phase offsets
+    //int phaseOffset = n *  2 / 2000 % symbolPeriod;
+    // no phase offset
+    //int phaseOffset = 0;
+    // random phase offset
+    static int phaseOffset = -1;
+    if (phaseOffset == -1)
+        phaseOffset = rand() % symbolPeriod;
 
+    // apply phase offset
+    n += phaseOffset;
 
-    //free(samples);
+    iqsample_t sample;  // The IQ sample currently being worked on, temporal resolution to audio sample
+    double audioSample; // the final audio sample
+    int symbolIndex = n / totalPeriod;  // symbol number indexed from 0, temporal resolution to IQ sample
+
+    // random IQ in constelation defined by power
+    int power = 2;  // log base2 of number of symbols. number of symbols should also be a perfect square
+    int symbols = pow(2, power);
+    int square = sqrt(symbols);
+
+    // get IQ samples from the IQ sampling function
+    sample = randomQAM_withPreamble(symbolIndex, square);
+
+    // amplitude adjustment
+    //double totalAmplitude = 0.01;
+    double totalAmplitude = 1;
+    //double totalAmplitude = 0.5;
+
+    // random noise injection to IQ value
+    double randomness = 0.0;
+    double randI = ((double)rand() / RAND_MAX * 2 - 1) * randomness;
+    double randQ = ((double)rand() / RAND_MAX * 2 - 1) * randomness;
+
+    // implementing guard period
+    // turns out this fucks up the gardner algorithm. ONLY for OFDM, not for QAM. Will use this later probs. disable by setting guard period to 0
+    // time index of each symbol to resolution of audio sample
+    int symbolStep = n % totalPeriod - guardPeriod;   // should be guardPeriod -> symbolPeriod -> 0 -> symbolPeriod as n increases from 0 -> totalPeriod
+    audioSample =
+    (
+        (sample.I + randI) * cos(2.0 * M_PI * symbolStep * k / symbolPeriod) + 
+        (sample.Q + randQ) * sin(2.0 * M_PI * symbolStep * k / symbolPeriod)
+    ) / 2.0 * sqrt(2.0) * totalAmplitude;
 
    return audioSample;
-
-    //return (I * sin(2 * M_PI * t * 600) + Q * cos(2 * M_PI * t * 600))/2 * sqrt(2);
-    //return (I * sin(2 * M_PI * t * 6000) + Q * cos(2 * M_PI * t * 6000))/2 * sqrt(2);
 }
 
 // this is the point where samples are generated
