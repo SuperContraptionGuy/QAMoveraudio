@@ -25,3 +25,10 @@ compare the synthesized signal to the one picked up on the microphone
 
 
 audacity is a great program to sanity check the waveforms and recordings.
+
+
+Big problem I just figured out was that the gain on my microphone was way too high, and it's not adjusted automatically, I have to manually adjust it with
+    wpctl set-volume ## 0.25
+to something that matches the environment. Not sure how to automate that yet
+But the performance is much better with the mic gain lower. The waveforms don't clip nearly as much.
+

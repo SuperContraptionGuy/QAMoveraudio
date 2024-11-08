@@ -45,8 +45,8 @@ typedef struct __attribute__((packed))
 
 static double WARN_UNUSED simpleQAM(int n, double t)
 {
-    int symbolPeriod = 32;
-    int k = 2;      // this is effectively the OFDM channel number, how many cycles per sample period
+    int symbolPeriod = 256;
+    int k = 4;      // this is effectively the OFDM channel number, how many cycles per sample period
     //uint8_t count = t * 100;
 
     // generating offsets in time to test the frame time syncronizer in qamDecoder
@@ -128,9 +128,10 @@ static double WARN_UNUSED simpleQAM(int n, double t)
         Q = (Q - decayStartQ) / decayTime * (t - decayStartTime) + decayStartQ;
     }
 
-    double totalAmplitude = 0.01;
-    //double totalAmplitude = 1;
-    double randomness = 0.1;
+    //double totalAmplitude = 0.01;
+    double totalAmplitude = 1;
+    //double totalAmplitude = 0.5;
+    double randomness = 0.0;
     double randI = ((double)rand() / RAND_MAX * 2 - 1) * randomness;
     double randQ = ((double)rand() / RAND_MAX * 2 - 1) * randomness;
 

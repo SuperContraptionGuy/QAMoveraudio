@@ -157,8 +157,8 @@ int main(void)
     FILE* eyeDiagramImaginaryStdin = NULL;
 
     // the OFDM channel number, how many cycles per symbol
-#define SYMBOL_PERIOD 32
-    int k = 2;
+#define SYMBOL_PERIOD 256
+    int k = 4;
     sample32_t sample;
 
     // buffer is the length of the symbol period, so that symbols are orthogonal
@@ -446,8 +446,8 @@ int main(void)
             // now I'm doing a bunch of stuff that happens every IQ sample. This all happens in the timespan of a single audio sample, which is 1/symbolPeriod of the time between IQ samples that could be used, but whatever
 
             // averaging filter for the equalizer
-            static double rmsaverageWindow[50] = {0};
-            int rmsaverageSize = 50;
+            static double rmsaverageWindow[44100 * 2 / SYMBOL_PERIOD] = {0};
+            int rmsaverageSize = 44100 * 2 /SYMBOL_PERIOD;
             int rmsaverageIndex = (n / SYMBOL_PERIOD) % rmsaverageSize;
 
             RMS = 0;
@@ -456,7 +456,7 @@ int main(void)
                 RMS += RMSsamples[i];
             }
             RMS /= 4;
-            rmsaverageWindow[rmsaverageIndex] = 1./sqrt(2) - RMS;
+            rmsaverageWindow[rmsaverageIndex] = RMS;
             double rmsaverage = 0;
 
             for(int i = 0; i < rmsaverageSize; i++)
@@ -464,18 +464,20 @@ int main(void)
                 rmsaverage += rmsaverageWindow[i];
             }
             rmsaverage /= rmsaverageSize;
-            //equalizationFactor += (1. / sqrt(2) - RMS) * 5.;
-
+            equalizationFactor += (1. / sqrt(2) - rmsaverage) * 0.002;
             // PID for the equalizer, just proportional. with max
-            equalizationFactor = fmax(fmin(equalizationFactor + rmsaverage * 2, 1000), 0);
+            equalizationFactor = fmax(fmin(equalizationFactor, 10000), -10000);
+            fprintf(waveformPlotStdin, "%i %f %f %f\n", n, sampleBuffer[bufferIndex], equalizationFactor, rmsaverage);
+
         #if DEBUG_LEVEL > 0
-            equalizationFactor = 1;     // equalization factor needs to ignore low frequency signals that give DC offset
+            //equalizationFactor = 1;     // equalization factor needs to ignore low frequency signals that give DC offset
             //equalizationFactor = 1./0.007;
         #endif
 
             // try to get a phase lock, symbol time lock, frequency lock, and equalization
             // calculate the error signal
             // Gardner Algorithm: Real Part( derivitive of IQ times conjugate of IQ)
+            // boobs-alexis
             // basically, it's trying to estimate the error of zero crossings
             double phaseOffsetEstimate = creal((IQ - IQlast) * conj(IQmidpoint));
 
@@ -527,8 +529,8 @@ int main(void)
             switch(lockstate)
             {
                 case NO_LOCK:
-                    P_gain = 2;
-                    I_gain = 0.02;
+                    P_gain = 2.5;
+                    I_gain = 0.003;
                     D_gain = 0;
                     break;
                 case SYMBOL_LOCK:
