@@ -43,10 +43,53 @@ typedef struct __attribute__((packed))
     };
 } riff_header_t;
 
+
+typedef struct
+{
+    double I;
+    double Q;
+} iqsample_t;
+
+
+// some functions to generate IQ streams with different properties
+iqsample_t alternateI(int symbolIndex)
+{
+    iqsample_t sample = {symbolIndex % 2 * 2 - 1, 0};
+    return sample;
+}
+
+iqsample_t randomQAM(int symbolIndex, int square)
+{
+    // square is the number of states of I and of Q, total states is square squared
+    iqsample_t sample = {0, 0};
+    sample.I = (double)(rand() % square) / (square - 1) * 2 - 1;
+    sample.Q = (double)(rand() % square) / (square - 1) * 2 - 1;
+    return sample;
+}
+
+iqsample_t randomQAM_withPreamble(int symbolIndex, int n, int totalPeriod, int square)
+{
+    static iqsample_t sample = {0, 0};
+    int preamble = 150; // length of preamble in symbols
+    if (symbolIndex < preamble)
+    {
+        // add a preamble that's easy to get rough time sync to
+        sample = alternateI(symbolIndex);
+    } else if (n % totalPeriod == 0) { // choose a new random QAM IQ value at start of every total period
+        // then start sending random data
+        sample = randomQAM(symbolIndex - preamble, square);
+    }
+    return sample;
+}
+
 static double WARN_UNUSED simpleQAM(int n, double t)
 {
     int symbolPeriod = 256;
-    int k = 4;      // this is effectively the OFDM channel number, how many cycles per sample period
+    //int guardPeriod = 4./1000 * 44100;     // I've found that the echos in a room last for about 3ms, durring that period, the symbol is phase offset and otherwise changed due to the last symbol and the transition between symbols
+    int guardPeriod = 0;    // have to disable for QAM, ie, set to 0, instead use a raised cosine filter for ISI combat
+    int totalPeriod = symbolPeriod + guardPeriod;
+    int k = 16;      // this is effectively the OFDM channel number, how many cycles per sample period
+    iqsample_t sample = {0, 0}; // the iq sample to generate
     //uint8_t count = t * 100;
 
     // generating offsets in time to test the frame time syncronizer in qamDecoder
@@ -62,6 +105,7 @@ static double WARN_UNUSED simpleQAM(int n, double t)
         phaseOffset = rand() % symbolPeriod;
 
     n += phaseOffset;
+    int symbolIndex = n / totalPeriod;
 
     long count = n / symbolPeriod;
     int power = 2;  // log base2 of number of symbols. number of symbols should also be a perfect square
@@ -70,6 +114,9 @@ static double WARN_UNUSED simpleQAM(int n, double t)
     uint8_t mask = symbols - 1;
     //printf("symbols: %i, square: %i, mask: %x\n", symbols, square, mask);
     count = count & mask;
+
+    //sample = randomOFDM_QAM_singleChannel_withPreamble(symbolIndex, n, totalPeriod, square);
+    sample = alternateI(symbolIndex);
 
     static double oldI = 0;
     static double oldQ = 0;
@@ -86,20 +133,9 @@ static double WARN_UNUSED simpleQAM(int n, double t)
     //double Q = (double)(count / square) / (square - 1) * 2 - 1;
 
     // random IQ in constelation defined by power
-    static double I = 0;
-    static double Q = 0;
-    if (n / symbolPeriod < 150)
-    {
-        // add a preamble that's easy to get rough time sync to
-        I = count % 2 * 2 - 1;
-    } else if (n % symbolPeriod == 0) {
-        // then start sending random data
-        //I = ((double)(rand() % 2) * 2 - 1) / 1;
-        //Q = ((double)(rand() % 2) * 2 - 1) / 1;
 
-        I = (double)(rand() % square) / (square - 1) * 2 - 1;
-        Q = (double)(rand() % square) / (square - 1) * 2 - 1;
-    }
+    double I = sample.I;
+    double Q = sample.Q;
 
     // variables to enable transition IQ values
     static double decayStartTime = 0;
@@ -128,14 +164,23 @@ static double WARN_UNUSED simpleQAM(int n, double t)
         Q = (Q - decayStartQ) / decayTime * (t - decayStartTime) + decayStartQ;
     }
 
+
     //double totalAmplitude = 0.01;
     double totalAmplitude = 1;
     //double totalAmplitude = 0.5;
     double randomness = 0.0;
     double randI = ((double)rand() / RAND_MAX * 2 - 1) * randomness;
     double randQ = ((double)rand() / RAND_MAX * 2 - 1) * randomness;
+    
+    // implementing guard period
+    // turns out this fucks up the gardner algorithm. ONLY for OFDM, not for QAM. Will use this later probs. disable by setting guard period to 0
+    int symbolStep = n % totalPeriod - guardPeriod;   // should be guardPeriod -> symbolPeriod -> 0 -> symbolPeriod as n increases from 0 -> totalPeriod
+    double audioSample = (
+        (I + randI) * cos(2.0 * M_PI * symbolStep * k / symbolPeriod) + 
+        (Q + randQ) * sin(2.0 * M_PI * symbolStep * k / symbolPeriod)
+    ) / 2.0 * sqrt(2.0) * totalAmplitude;
 
-    return ((I + randI) * cos(2.0 * M_PI * n * k / symbolPeriod) + (Q + randQ) * sin(2.0 * M_PI * n * k / symbolPeriod)) / 2.0 * sqrt(2.0) * totalAmplitude;
+   return audioSample;
 
     //return (I * sin(2 * M_PI * t * 600) + Q * cos(2 * M_PI * t * 600))/2 * sqrt(2);
     //return (I * sin(2 * M_PI * t * 6000) + Q * cos(2 * M_PI * t * 6000))/2 * sqrt(2);

@@ -158,7 +158,9 @@ int main(void)
 
     // the OFDM channel number, how many cycles per symbol
 #define SYMBOL_PERIOD 256
-    int k = 4;
+    int k = 16;
+    int guardPeriod = 4./1000 * 44100;      // 4ms guard period for room echos
+    int totalPeriod = SYMBOL_PERIOD + guardPeriod;
     sample32_t sample;
 
     // buffer is the length of the symbol period, so that symbols are orthogonal
@@ -352,8 +354,13 @@ int main(void)
     }
 
     // while there is data to recieve, not end of file
-    for(int n = 0; n < SYMBOL_PERIOD * 2000; n++)
+    for(int audioSampleIndex = 0; audioSampleIndex < SYMBOL_PERIOD * 2000; audioSampleIndex++)
     {
+        // gonna do something hacky here I think. if we are in a guard period, I'm just not gonna process that sample at all, and not going to index it.
+        // No I'm not. This is the point where QAM deviates from OFDM. In QAM, we use raised cosine filter or matched root raised cosine filters
+        // to combat inter symbol interference (ISI), but in OFDM, we use guard periods. the two are not interchangable because guard periods
+        // mess up the gardner algorithm's time synchronization method in QAM, and raised cosine filters mess up the orthogonality between OFDM channels.
+        int n = audioSampleIndex;
         // recieve data on stdin, signed 32bit integer
 
         // use the windowphase to adjust the buffer index position
