@@ -9,7 +9,6 @@ DEPS := $(OBJS:.o:.d)
 DEPFLAGS = -MT "$@" -MMD -MP -MF "$(BUILD_DIR)/$*.d"
 
 CFLAGS := \
-	#-O3 \
 	-Wall \
 	-Wextra \
 	-Wstrict-prototypes \
