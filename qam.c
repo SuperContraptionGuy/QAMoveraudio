@@ -208,58 +208,10 @@ double raisedCosQAM(int n, int sampleRate)
 
    return audioSample;
 
-
-
-    /*
-    // TODO ok, this is broken, and slow as hell. I should instead generate all the filtered IQ data ahead of time, then sample it to generate the waveform in real time
-    // grab enough IQ samples to cover the filter temporal width
-    for(int i = 0; i < filterPeriod; i++)
-    {
-        int filter_symbolIndex = i - filter_symbolIndex / 2;    // should go -5 -> 0 -> 5
-        if(symbolIndex - filter_symbolIndex < 0)
-        {
-            //samples[i].I = 0; // if negative sample index, use 0 as the IQ sample
-            //samples[i].Q = 0; // if negative sample index, use 0 as the IQ sample
-            sample.I = 0; // if negative sample index, use 0 as the IQ sample
-            sample.Q = 0; // if negative sample index, use 0 as the IQ sample
-        }
-        // get IQ samples from the IQ sampling function
-        //samples[i] = randomQAM_withPreamble(symbolIndex + filter_symbolIndex, square);
-        sample = randomQAM_withPreamble(filter_symbolIndex, square);
-
-
-    //}
-    //for(int i = 0; i < filterPeriod; i++)
-    //{
-        //int filter_symbolIndex = i - filter_symbolIndex / 2;    // should go -5 -> 0 -> 5
-        // convert IQ sampels into audio samples
-
-        // raised cos filter
-        double b = 0.42;    // filter parameter beta
-        double filter = sin(M_PI * filter_symbolIndex / symbolPeriod) / (M_PI * filter_symbolIndex / symbolPeriod) * (cos(M_PI * b * filter_symbolIndex / symbolPeriod)) / (1 - pow(2 * b * filter_symbolIndex / symbolPeriod, 2));
-        if(!isfinite(filter))   // in case it's undefined, ie divide by zero case
-            filter = (double)symbolPeriod / 2 / b;
-
-        //double totalAmplitude = 0.01;
-        double totalAmplitude = 1;
-        //double totalAmplitude = 0.5;
-        double randomness = 0.0;
-        double randI = ((double)rand() / RAND_MAX * 2 - 1) * randomness;
-        double randQ = ((double)rand() / RAND_MAX * 2 - 1) * randomness;
-        // implementing guard period
-        // turns out this fucks up the gardner algorithm. ONLY for OFDM, not for QAM. Will use this later probs. disable by setting guard period to 0
-        int symbolStep = n % totalPeriod - guardPeriod - filterPeriod;   // should be guardPeriod -> symbolPeriod -> 0 -> symbolPeriod as n increases from 0 -> totalPeriod
-        audioSample +=
-        (
-            (sample.I + randI) * cos(2.0 * M_PI * symbolStep * k / symbolPeriod) * filter + 
-            (sample.Q + randQ) * sin(2.0 * M_PI * symbolStep * k / symbolPeriod) * filter
-        ) / 2.0 * sqrt(2.0) * totalAmplitude;
-    }
-    return 0;
-    */
 }
 
-static double simpleQAM(int n)
+// really this is generating a single OFDM channel without guard periods
+static double singleChannelODFM_noguard(int n)
 {
     int symbolPeriod = 256;
     //int guardPeriod = 4./1000 * 44100;     // I've found that the echos in a room last for about 3ms, durring that period, the symbol is phase offset and otherwise changed due to the last symbol and the transition between symbols
@@ -316,10 +268,10 @@ static double simpleQAM(int n)
 }
 
 // this is the point where samples are generated
-static double WARN_UNUSED calculateSample(int n, double t)
+static double WARN_UNUSED calculateSample(int n, int sampleRate)
 {
     //return simpleQAM(n);
-    return raisedCosQAM(n, 44100);
+    return raisedCosQAM(n, sampleRate);
 }
 
 // generates a .wav header of 44 bytes long
@@ -398,6 +350,15 @@ exit:
     return 0;
 }
 
+typedef struct __attribute__((packed))
+{
+    union
+    {
+        int32_t value;
+        uint8_t bytes[sizeof(int32_t)];
+    };
+} int32_to_bytes_t;
+
 static int WARN_UNUSED generateSamplesAndOutput(char* filenameInput)
 {
     int retval = 0;
@@ -410,37 +371,19 @@ static int WARN_UNUSED generateSamplesAndOutput(char* filenameInput)
 
     int fileDescriptor = -1;
 
+    // audio sample rate
     int sampleRate = 44100;
-
     // total number of samples to generate
     long length = 100000;
-
     // the number of the current sample
     long n = 0;
 
     // length of the file write buffer, samples times 4 bytes per sample
-    const int bufferLength = 10 * 4;
-
+    const int bufferLength = 100 * 4;
     // the file write buffer, used to buffer the write calls
     uint8_t buffer[bufferLength];
-
     // number of bytes ready to be written out of the buffer in case we need to flush the buffer before it's full
     int bufferReadyBytes = 0;
-
-    // the sample value used in calculations, to be normalized
-    double value;
-
-    // sample value after put into signed integer range
-    int32_t normalized = 0;
-
-    // maximum signed integer value used for normalization
-    //int32_t max = INT32_MAX > -(long)INT32_MIN ? -INT32_MIN : INT32_MAX;
-
-    // holds each individual byte as it's written out Little Endian style
-    char byte;
-
-    // pointer used for breaking up the normalized value into bytes
-    unsigned char* pointer = (unsigned char*)&normalized;
 
     // Whether to send samples over stdout or to file
     int outputstd = 0;
@@ -547,23 +490,24 @@ static int WARN_UNUSED generateSamplesAndOutput(char* filenameInput)
         // calculate a chunk of samples until the buffer is full or max is reached. one sample at a time, 4 bytes at a time
         for(bufferReadyBytes = 0; (bufferReadyBytes < bufferLength) && (n < length); bufferReadyBytes += 4, n++)
         {
+            // the sample value used in calculations, to be normalized
+            double sampleValue;
+            // sample value after put into signed integer range, then split into bytes for file writing and audio output
+            int32_to_bytes_t normalizedSampleValue;
+            // holds each individual byte as it's written out Little Endian style
+            char byte;
+
             // get the double sample value, should be between -1 and 1
-            value = calculateSample(n, (double)n / sampleRate);
-
+            sampleValue = calculateSample(n, sampleRate);
             // calculate the final signed integer to be output as a sample
-
             // the magnitude of the max is always one smaller than the magnitude of the min
-            normalized = value * INT32_MAX;
+            normalizedSampleValue.value = sampleValue * INT32_MAX;
 
             // split up the normalized value into individual bytes
             for(int i = 0; i < 4; i++)
             {
                 // get the byte from normalized. pointer points to the adress of the first byte in normalized
-                byte = *(pointer + i);
-
-                // labeling the bytes to make sure all is well
-                //byte = n * 4 + i;
-
+                byte = normalizedSampleValue.bytes[i];
                 // add byte to the buffer
                 buffer[bufferReadyBytes + i] = byte;
 

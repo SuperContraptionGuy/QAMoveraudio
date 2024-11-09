@@ -8,8 +8,6 @@
 #include <string.h>
 #include <errno.h>
 
-// length of each symbol in samples, and so the fft window.
-// This is the period of time all the orthogonal symbols will be integrated over
 
 // Debug flag
 #define DEBUG_LEVEL 2
@@ -154,6 +152,28 @@ double complex dft(double* buffer,
 
 int main(void)
 {
+    // length of each symbol in samples, and so the fft window.
+    // This is the period of time all the orthogonal symbols will be integrated over
+#define SYMBOL_PERIOD 64
+    // the OFDM channel number, how many cycles per symbol
+    int k = 4;
+    // buffer is the length of the symbol period, so that symbols are orthogonal
+    double sampleBuffer[SYMBOL_PERIOD] = {0.0};
+
+    //int guardPeriod = 4./1000 * 44100;      // 4ms guard period for room echos
+    //int guardPeriod = 0;
+    //int totalPeriod = SYMBOL_PERIOD + guardPeriod;
+    sample32_t sample;
+
+    // the offset of sample buffer or fftwindow in time, to get symbol time sync
+    int windowPhase = 0;
+    //double windowPhaseReal = (double)rand() / RAND_MAX * SYMBOL_PERIOD; // the floating point window phase, to be quantized into windowPhase
+    double windowPhaseReal = 0;
+
+    // to help the if statements that choose when to take an OFDM DFT sample not get stuck in a loop when the window offset changes
+    int tookSampleAt = 0;
+
+    // prepare file descriptors for output files and streams
     int retval = 0;
 
     FILE* waveformPlotStdin = NULL;
@@ -165,24 +185,6 @@ int main(void)
     FILE* eyeDiagramRealStdin = NULL;
     FILE* eyeDiagramImaginaryStdin = NULL;
 
-    // the OFDM channel number, how many cycles per symbol
-#define SYMBOL_PERIOD 64
-    int k = 4;
-    //int guardPeriod = 4./1000 * 44100;      // 4ms guard period for room echos
-    //int guardPeriod = 0;
-    //int totalPeriod = SYMBOL_PERIOD + guardPeriod;
-    sample32_t sample;
-
-    // buffer is the length of the symbol period, so that symbols are orthogonal
-    double sampleBuffer[SYMBOL_PERIOD] = {0.0};
-
-    // the offset of sample buffer or fftwindow in time, to get symbol time sync
-    int windowPhase = 0;
-
-    //double windowPhaseReal = (double)rand() / RAND_MAX * SYMBOL_PERIOD; // the floating point window phase, to be quantized into windowPhase
-    double windowPhaseReal = 0;
-
-    int tookSampleAt = 0;
 
     // process arguments
     //  none right now
@@ -367,33 +369,42 @@ int main(void)
     // a continuous sin cos multiplier for IQ sampling, not a DFT.
     // and it's not quite right for OFDM since we don't have a guard period yet, but it's closer to
     // that than qam.
-    // while there is data to recieve, not end of file
+    // while there is data to recieve, not end of file -> right now just a fixed number of 2000
     for(int audioSampleIndex = 0; audioSampleIndex < SYMBOL_PERIOD * 2000; audioSampleIndex++)
     {
         // gonna do something hacky here I think. if we are in a guard period, I'm just not gonna process that sample at all, and not going to index it.
         // No I'm not. This is the point where QAM deviates from OFDM. In QAM, we use raised cosine filter or matched root raised cosine filters
         // to combat inter symbol interference (ISI), but in OFDM, we use guard periods. the two are not interchangable because guard periods
         // mess up the gardner algorithm's time synchronization method in QAM, and raised cosine filters mess up the orthogonality between OFDM channels.
+        // raised cos filter also causes ISI in back to back OFDM symbols because it blends them together at the symbol edges. I need a totally different IQ sampling scheme for
+        // QAM. Continuous IQ sampling rather than DFT sampling
         int n = audioSampleIndex;
-        // recieve data on stdin, signed 32bit integer
 
         // use the windowphase to adjust the buffer index position
         //int bufferIndex = (n + windowPhase)%SYMBOL_PERIOD;
         // Let's not use window phase to adjust index, and just pass the window phase to dft like a sane person
         int bufferIndex = n % SYMBOL_PERIOD;
 
+        // recieve data on stdin, signed 32bit integer
         for(size_t i = 0; i < sizeof(sample.value); i++)
         {
             // get the bytes, little endian, of signed 32bit integer, using the struct to do type punning
             sample.byte[i] = getchar();
         }
 
+        static double equalizationFactor = 1;   // used by the equalization PID loop to control the overall volume
+        static double RMSsamples[4] = {0};
+        double RMS;
+
         // convert to a double ranged from -1 to 1
-        static double equalizationFactor = 1;
         sampleBuffer[bufferIndex] = (double)sample.value / INT32_MAX * equalizationFactor;
 
+    #if DEBUG_LEVEL > 0
+        // debug waveform plot
         fprintf(waveformPlotStdin, "%i %f %f\n", n, sampleBuffer[bufferIndex], equalizationFactor);
+    #endif
 
+        // array storing super sampled IQ values
         // all the IQ samples stored in these bins.
         //      0 - just before ideal midpoint
         //      1 - just after ideal midpoint
@@ -406,13 +417,6 @@ int main(void)
         static double complex IQ = 0;   // at ideal sample time
         static double complex IQlast = 0;   // previous ideal sample time
 
-        static double RMSsamples[4] = {0};
-        double RMS;
-
-        // array storing super sampled IQ values
-        //static double complex IQsamples[SYMBOL_PERIOD];
-        //static double RMSsamples[SYMBOL_PERIOD];
-
     #if DEBUG_LEVEL > 0
         // oversampling IQ values for a nice eye diagram to help debug stuff
         double complex oversampledIQ = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex + 1, n%SYMBOL_PERIOD, 0., k, &RMS, NODEBUG, NULL, n);
@@ -420,9 +424,10 @@ int main(void)
         fprintf(eyeDiagramImaginaryStdin, "%f %i %f\n", fmod((double)n / SYMBOL_PERIOD, 4), n / 4 / SYMBOL_PERIOD, cimag(oversampledIQ));
     #endif
 
-        //if((bufferIndex == SYMBOL_PERIOD / 2 - 1) && (n - tookSampleAt > 1))
+        // deciding when to take IQ samples
         // take a sample right between the ideal samples which are taken at windowPhase
         // if we are half full on the buffer, take an intermidiate IQ sample, for timing sync later
+        // compute DFT (rn just one freq, but when we implement OFDM, then at many harmonic(orthogonal) frequencies)
         if(bufferIndex == ((int)floor(windowPhaseReal) + SYMBOL_PERIOD / 2 - 1) % SYMBOL_PERIOD)    // just before real window phase offset midpoint
             IQsamples[0] = dft(sampleBuffer,
                                SYMBOL_PERIOD,
@@ -471,14 +476,9 @@ int main(void)
                                fftDebuggerStdin,
                                n);
 
-        //if((bufferIndex == (windowPhase + SYMBOL_PERIOD - 1) % SYMBOL_PERIOD) && (n - tookSampleAt > SYMBOL_PERIOD / 2))
         // I added another condition to help debounce. sometimes it takes many samples in a row due to changing window offset
         if((bufferIndex == ((int)ceil(windowPhaseReal) + SYMBOL_PERIOD) % SYMBOL_PERIOD) && (n - tookSampleAt > SYMBOL_PERIOD / 2))  // just after real window phase offset, do the calculations that must be done once per symbol recieved
         {
-            // compute DFT (rn just one freq, but when we implement OFDM, then at many harmonic(orthogonal) frequencies)
-            //IQ = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex + 1, windowPhase, 0., k, &RMS, ALLIGNED, fftDebuggerStdin, n);
-            // throwing away the last RMS value from MIDPOINT calculation, which is probably a shame and a waste
-
             // interpolate IQ and IQmidpoint from actual IQ samples in IQsamples
             // just doing linear interpolation
             //      (slope) * interp_X + initial
@@ -487,18 +487,7 @@ int main(void)
             IQlast =        IQ;
             IQ =            (IQsamples[3] - IQsamples[2]) * fmod(windowPhaseReal, 1) + IQsamples[2];
 
-            /*
-            IQlast = IQ;
-            IQ = IQsamples[2];
-            IQmidpoint = IQsamples[0];
-            */
-            
-            //IQlast = 0;
-            //IQ = 0;
-            //IQmidpoint = 0;
-
             tookSampleAt = n;
-            
 
             // now I'm doing a bunch of stuff that happens every IQ sample. This all happens in the timespan of a single audio sample, which is 1/symbolPeriod of the time between IQ samples that could be used, but whatever
 
@@ -539,9 +528,11 @@ int main(void)
             double phaseOffsetEstimate = creal((IQ - IQlast) * conj(IQmidpoint));
 
         #if DEBUG_LEVEL > 1
+            // imprint the phase offset estimate on the fftDebugger plot to help understand the relationship between the DFT and symbol sync algo
             fprintf(fftDebuggerStdin, "%i %i %f %i %f\n", n, 10, phaseOffsetEstimate + 2, 15, (double)(n % SYMBOL_PERIOD) / SYMBOL_PERIOD + 2);
         #endif
 
+            // state of the timing lock to modulate PID params
             static timing_lock_t lockstate = NO_LOCK;
 
             // Process Variable (PV, ie phase estimate) filter
