@@ -54,7 +54,8 @@ typedef struct
 // some functions to generate IQ streams with different properties
 iqsample_t alternateI(int symbolIndex)
 {
-    iqsample_t sample = {symbolIndex % 2 * 2 - 1, 0};
+    //iqsample_t sample = {symbolIndex % 2 * 2 - 1, 0};
+    iqsample_t sample = {symbolIndex % 2, 0};
     return sample;
 }
 
@@ -92,9 +93,124 @@ iqsample_t sequentialIQ(int symbolIndex, int square)
     return symbol;
 }
 
-/*
-double raisedCosQAM(int n)
+double raisedCosQAM(int n, int sampleRate)
 {
+    int symbolPeriod = 64; // audio samples per symbol
+    int k = 4; // cycles per period
+    int filterSides = 10;    // number of symbols to either side of current symbol to filter with raised cos
+    int filterLengthSymbols = 2 * filterSides + 1;    // length of raised cos filter in IQ symbols, ie, how many IQ samples we need to generate the current symbol
+    int filterLength = filterLengthSymbols * symbolPeriod;  // length in audio samples
+
+    // concept:
+    //  generate the raised cos filter data once
+    //  generate IQ samples ahead of time, just in time
+    //  generate audio samples based on those two pieces of info
+
+    // array to store time series of filter data
+    static double *filter;
+    // array to store timeseries of IQ samples
+    static iqsample_t *IQdata;
+
+    static int initialized = 0;
+    if(!initialized)
+    {
+        // initialize raised cos filter data
+        filter = malloc(sizeof(double) * filterLength); // this never gets released. so, might wanna fix that TODO
+        for(int i = 0; i < filterLength; i++)
+        {
+            int filter_symbolIndex = i - filterLength / 2;    // should go -filterLength/2 -> 0 -> filterLength/2
+            // raised cos filter math
+            double b = 0.42;    // filter parameter beta
+            double filterValue = sin(M_PI * filter_symbolIndex / symbolPeriod) / (M_PI * filter_symbolIndex / symbolPeriod) * (cos(M_PI * b * filter_symbolIndex / symbolPeriod)) / (1 - pow(2 * b * filter_symbolIndex / symbolPeriod, 2));
+            if(!isfinite(filterValue))   // in case it's undefined, ie divide by zero case
+                filterValue = (double)symbolPeriod / 2 / b;
+            if(filter_symbolIndex == 0)
+                filterValue = 1;    // the math gives a divide by zero at index 0
+
+            filter[i] = filterValue;
+        }
+
+        // generate enough IQ samples for first audio sample
+        IQdata = malloc(sizeof(iqsample_t) * filterLengthSymbols);  // TODO this is never freed. These should prob be passed in as a paramter and freed somewhere in the larger scope
+        for(int i = 0; i < filterLengthSymbols; i++)
+        {
+            int IQIndex = i - filterLengthSymbols / 2;    // shoud go from -filterlengthsymbols / 2 -> 0 -> filterlengthsymbols / 2
+            iqsample_t sample = {0, 0};
+            // fill the circular buffer in the right order so that index 0 turns out to be the first IQ sample
+            if(IQIndex < 0)
+            {
+                IQIndex = filterLengthSymbols + IQIndex;    // make positive
+                IQdata[IQIndex % filterLengthSymbols] = sample; // the negative time samples are 0
+            } else {
+                //IQdata[IQIndex % filterLengthSymbols] = alternateI(IQIndex);
+                IQdata[IQIndex % filterLengthSymbols] = randomQAM(IQIndex, 2);
+                //IQdata[IQIndex % filterLengthSymbols] = randomQAM_withPreamble(IQIndex, 2);
+            }
+        }
+
+        // ensure initialize only runs once
+        initialized = 1;
+    }
+
+    // current symbol number
+    int symbolIndex = n / symbolPeriod;
+    int sampleIndex = n % symbolPeriod; // index of each sample in a symbol, where as n is increasing for the whole signal
+    // circular buffer index
+    int IQsampleIndex = symbolIndex % filterLengthSymbols;    // IQdata[IQsampleIndex] is current IQ sample, indexes above are future IQdata and below past IQ data both wrapping around until the are filterLengthSymbols / 2 away from current sample index
+    
+    // generate the next future IQ sample when entering a new symbol period
+    //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = alternateI(symbolIndex + filterLengthSymbols / 2);
+    if(sampleIndex == 0)
+    {
+        IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = randomQAM(symbolIndex + filterLengthSymbols / 2, 2);
+        //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = randomQAM_withPreamble(symbolIndex + filterLengthSymbols / 2, 2);
+        //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = alternateI(symbolIndex + filterLengthSymbols / 2);
+    }
+
+    // add up raised cos contributions from all samples in the IQdata array
+    iqsample_t filteredIQsample = {0, 0};
+    for(int i = 0; i < filterLengthSymbols; i++)
+    //int i = symbolIndex % filterLengthSymbols;
+    //i = filterLengthSymbols - i - 1;
+    {
+        int filterIndex = (filterLengthSymbols - i - 1) * symbolPeriod + sampleIndex;    // pick a filter index
+        int IQIndex = (IQsampleIndex + i - filterLengthSymbols / 2) % filterLengthSymbols;
+        if(IQIndex < 0)
+            IQIndex = filterLengthSymbols + IQIndex;    // make sure index is positive and wraps backwards
+        filteredIQsample.I += filter[filterIndex] * IQdata[IQIndex].I;
+        filteredIQsample.Q += filter[filterIndex] * IQdata[IQIndex].Q;
+        //filteredIQsample.I += filter[filterIndex];
+        //filteredIQsample.I = IQdata[IQIndex].I;
+        //filteredIQsample.I += IQdata[IQIndex].I / filterLengthSymbols;
+    }
+    filteredIQsample.I /= 2;
+    filteredIQsample.Q /= 2;
+
+    //return filter[symbolIndex%filterLengthSymbols*symbolPeriod+sampleIndex];
+    //return IQdata[(IQsampleIndex + n%filterLengthSymbols - filterLengthSymbols / 2) %filterLengthSymbols].I;
+    //return IQdata[IQsampleIndex].I;
+    //return filteredIQsample.I;
+    //return (double)i / filterLengthSymbols;
+    //return filter[n%filterLength];
+
+    //if(n % symbolPeriod < filterLengthSymbols)
+        //return IQdata[(IQsampleIndex + sampleIndex) % filterLengthSymbols].I;
+    //return -0.5;
+
+    //filteredIQsample.I = 1;
+    //filteredIQsample.Q = 0;
+
+    double audioSample =
+    (
+        (filteredIQsample.I) * cos(2.0 * M_PI * sampleIndex * k / symbolPeriod) + 
+        (filteredIQsample.Q) * sin(2.0 * M_PI * sampleIndex * k / symbolPeriod)
+    ) / 2.0 * sqrt(2.0);
+
+   return audioSample;
+
+
+
+    /*
     // TODO ok, this is broken, and slow as hell. I should instead generate all the filtered IQ data ahead of time, then sample it to generate the waveform in real time
     // grab enough IQ samples to cover the filter temporal width
     for(int i = 0; i < filterPeriod; i++)
@@ -140,10 +256,10 @@ double raisedCosQAM(int n)
         ) / 2.0 * sqrt(2.0) * totalAmplitude;
     }
     return 0;
+    */
 }
-*/
 
-static double WARN_UNUSED simpleQAM(int n, double t)
+static double simpleQAM(int n)
 {
     int symbolPeriod = 256;
     //int guardPeriod = 4./1000 * 44100;     // I've found that the echos in a room last for about 3ms, durring that period, the symbol is phase offset and otherwise changed due to the last symbol and the transition between symbols
@@ -202,7 +318,8 @@ static double WARN_UNUSED simpleQAM(int n, double t)
 // this is the point where samples are generated
 static double WARN_UNUSED calculateSample(int n, double t)
 {
-    return simpleQAM(n, t);
+    //return simpleQAM(n);
+    return raisedCosQAM(n, 44100);
 }
 
 // generates a .wav header of 44 bytes long

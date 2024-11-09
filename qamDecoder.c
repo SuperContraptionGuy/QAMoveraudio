@@ -42,7 +42,16 @@ typedef enum
 //  offset is the starting position of the window in the buffer
 //  windowPhase is the offset in time the window is from the start of the audio samples, probably modulo the symbol period
 //  carrierPhase is the phase offset of the carrier relative to the windowPhase
-double complex dft(double* buffer, int windowSize, int offset, int windowPhase, double carrierPhase, int k, double* rmsOut, dft_debug_t debugFlag, FILE* debug_fd, int debug_n)
+double complex dft(double* buffer,
+                   int windowSize,
+                   int offset,
+                   int windowPhase,
+                   double carrierPhase,
+                   int k,
+                   double* rmsOut,
+                   dft_debug_t debugFlag,
+                   FILE* debug_fd,
+                   int debug_n)
 {
 #if DEBUG_LEVEL <= 1
     (void)debugFlag;
@@ -157,10 +166,11 @@ int main(void)
     FILE* eyeDiagramImaginaryStdin = NULL;
 
     // the OFDM channel number, how many cycles per symbol
-#define SYMBOL_PERIOD 256
-    int k = 16;
-    int guardPeriod = 4./1000 * 44100;      // 4ms guard period for room echos
-    int totalPeriod = SYMBOL_PERIOD + guardPeriod;
+#define SYMBOL_PERIOD 64
+    int k = 4;
+    //int guardPeriod = 4./1000 * 44100;      // 4ms guard period for room echos
+    //int guardPeriod = 0;
+    //int totalPeriod = SYMBOL_PERIOD + guardPeriod;
     sample32_t sample;
 
     // buffer is the length of the symbol period, so that symbols are orthogonal
@@ -353,6 +363,10 @@ int main(void)
         goto exit;
     }
 
+    // I just realized this whole loop will not really work for QAM signals, I should be using
+    // a continuous sin cos multiplier for IQ sampling, not a DFT.
+    // and it's not quite right for OFDM since we don't have a guard period yet, but it's closer to
+    // that than qam.
     // while there is data to recieve, not end of file
     for(int audioSampleIndex = 0; audioSampleIndex < SYMBOL_PERIOD * 2000; audioSampleIndex++)
     {
@@ -410,20 +424,56 @@ int main(void)
         // take a sample right between the ideal samples which are taken at windowPhase
         // if we are half full on the buffer, take an intermidiate IQ sample, for timing sync later
         if(bufferIndex == ((int)floor(windowPhaseReal) + SYMBOL_PERIOD / 2 - 1) % SYMBOL_PERIOD)    // just before real window phase offset midpoint
-            IQsamples[0] = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex + 1, n%SYMBOL_PERIOD, 0., k, &RMSsamples[0], MIDPOINT, fftDebuggerStdin, n);
+            IQsamples[0] = dft(sampleBuffer,
+                               SYMBOL_PERIOD,
+                               bufferIndex + 1,
+                               (n+1)%SYMBOL_PERIOD,
+                               0.,
+                               k,
+                               &RMSsamples[0],
+                               MIDPOINT,
+                               fftDebuggerStdin,
+                               n);
 
         if(bufferIndex == ((int)ceil(windowPhaseReal) + SYMBOL_PERIOD / 2 - 1) % SYMBOL_PERIOD)     // just after real window phase offset midpoint;
-            IQsamples[1] = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex + 1, n%SYMBOL_PERIOD, 0., k, &RMSsamples[1], MIDPOINT, fftDebuggerStdin, n);
+            IQsamples[1] = dft(sampleBuffer,
+                               SYMBOL_PERIOD,
+                               bufferIndex + 1,
+                               (n+1)%SYMBOL_PERIOD,
+                               0.,
+                               k,
+                               &RMSsamples[1],
+                               MIDPOINT,
+                               fftDebuggerStdin,
+                               n);
 
         if(bufferIndex == ((int)floor(windowPhaseReal) + SYMBOL_PERIOD - 1) % SYMBOL_PERIOD)        // just before real window phase offset
-            IQsamples[2] = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex + 1, n%SYMBOL_PERIOD, 0., k, &RMSsamples[2], ALLIGNED, fftDebuggerStdin, n);
+            IQsamples[2] = dft(sampleBuffer,
+                               SYMBOL_PERIOD,
+                               bufferIndex + 1,
+                               (n+1)%SYMBOL_PERIOD,
+                               0.,
+                               k,
+                               &RMSsamples[2],
+                               ALLIGNED,
+                               fftDebuggerStdin,
+                               n);
 
         if(bufferIndex == ((int)ceil(windowPhaseReal) + SYMBOL_PERIOD - 1) % SYMBOL_PERIOD)         // just after real window phase offset
-            IQsamples[3] = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex + 1, n%SYMBOL_PERIOD, 0., k, &RMSsamples[3], ALLIGNED, fftDebuggerStdin, n);
+            IQsamples[3] = dft(sampleBuffer,
+                               SYMBOL_PERIOD,
+                               bufferIndex + 1,
+                               (n+1)%SYMBOL_PERIOD,
+                               0.,
+                               k,
+                               &RMSsamples[3],
+                               ALLIGNED,
+                               fftDebuggerStdin,
+                               n);
 
         //if((bufferIndex == (windowPhase + SYMBOL_PERIOD - 1) % SYMBOL_PERIOD) && (n - tookSampleAt > SYMBOL_PERIOD / 2))
         // I added another condition to help debounce. sometimes it takes many samples in a row due to changing window offset
-        if((bufferIndex == ((int)ceil(windowPhaseReal) + SYMBOL_PERIOD - 1) % SYMBOL_PERIOD) && (n - tookSampleAt > SYMBOL_PERIOD / 2))  // just after real window phase offset, do the calculations that must be done once per symbol recieved
+        if((bufferIndex == ((int)ceil(windowPhaseReal) + SYMBOL_PERIOD) % SYMBOL_PERIOD) && (n - tookSampleAt > SYMBOL_PERIOD / 2))  // just after real window phase offset, do the calculations that must be done once per symbol recieved
         {
             // compute DFT (rn just one freq, but when we implement OFDM, then at many harmonic(orthogonal) frequencies)
             //IQ = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex + 1, windowPhase, 0., k, &RMS, ALLIGNED, fftDebuggerStdin, n);
@@ -477,7 +527,7 @@ int main(void)
             fprintf(waveformPlotStdin, "%i %f %f %f\n", n, sampleBuffer[bufferIndex], equalizationFactor, rmsaverage);
 
         #if DEBUG_LEVEL > 0
-            //equalizationFactor = 1;     // equalization factor needs to ignore low frequency signals that give DC offset
+            equalizationFactor = 1;     // equalization factor needs to ignore low frequency signals that give DC offset
             //equalizationFactor = 1./0.007;
         #endif
 
@@ -570,8 +620,8 @@ int main(void)
             //windowPhase = (n * 2 / 2000) % SYMBOL_PERIOD;
             //windowPhase = (n * 4 * 2/ (SYMBOL_PERIOD * 2000) ) % 4 * SYMBOL_PERIOD / 4;
             //windowPhase = SYMBOL_PERIOD / 4;
-            //windowPhase = 0;
-            //windowPhaseReal = 0.1;
+            windowPhase = 0;
+            windowPhaseReal = 0.0001;
             //windowPhase = (int)((windowPhase + phaseAdjustment) < 0 ? (SYMBOL_PERIOD - windowPhase + phaseAdjustment) : (windowPhase + phaseAdjustment)) % SYMBOL_PERIOD;
         #endif
 
