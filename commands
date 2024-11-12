@@ -8,6 +8,7 @@ qamDecoder takes samples directly from stdin, so arecord can pull samples from t
 
 This helps cut out the first second of audio while alsa actually prepares the mic amplifier
     arecord -r 44100 -c 1 -f S32_LE -d 1 > /dev/null; ./qam test & arecord -c 1 -r 44100 -f S32_LE | ./qamDecoder
+    arecord -r 44100 -c 1 -f S32_LE -d 1 > /dev/null; ./build/qam ./data/test & arecord -c 1 -r 44100 -f S32_LE | ./build/qamDecoder
 
 or, you can pipe samples directly stdout | stdin if you pass '-' as the filename to qam
     ./qam - | ./qamDecoder
@@ -24,3 +25,10 @@ compare the synthesized signal to the one picked up on the microphone
 
 
 audacity is a great program to sanity check the waveforms and recordings.
+
+
+Big problem I just figured out was that the gain on my microphone was way too high, and it's not adjusted automatically, I have to manually adjust it with
+    wpctl set-volume ## 0.25
+to something that matches the environment. Not sure how to automate that yet
+But the performance is much better with the mic gain lower. The waveforms don't clip nearly as much.
+
