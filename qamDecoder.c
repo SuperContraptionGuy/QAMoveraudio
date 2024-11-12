@@ -11,15 +11,25 @@
 
 // Debug flag
 #define DEBUG_LEVEL 2
-
-typedef struct __attribute__((packed))
+typedef union __attribute__((packed))
 {
-    union
-    {
-        int32_t value;
-        uint8_t byte[sizeof(int32_t)];
-    };
-} sample32_t;
+    int32_t value;
+    uint8_t byte[sizeof(int32_t)];
+} sample_32_converter_t;    // union to help convert from bytes to integer to double
+
+typedef struct 
+{
+    double sample;      // double value representation of sample
+    int sampleRate;     // rate of samples per second
+    int sampleIndex;    // index since begining of record
+} sample_double_t;
+
+typedef struct 
+{
+    double complex sample;      // double value representation of sample
+    int sampleRate;     // rate of samples per second
+    int sampleIndex;    // index since begining of record
+} sample_complex_t;
 
 typedef enum
 {
@@ -150,6 +160,430 @@ double complex dft(double* buffer,
     return IQ;
 }
 
+typedef struct
+{
+    FILE* waveformPlotStdin;
+    FILE* fftDebuggerStdin;
+    FILE* errorPlotStdin;
+    FILE* IQplotStdin;
+    FILE* IQvstimeStdin;
+    FILE* eyeDiagramRealStdin;
+    FILE* eyeDiagramImaginaryStdin;
+    FILE* filterDebugStdin;
+} debugPlots_t;
+
+typedef struct
+{
+    int symbolPeriod;
+    double **sampleBuffer;
+    int k;  // the OFDM channel number
+    double windowPhaseReal;
+
+} OFDM_properties_t;
+
+typedef struct
+{
+    double carrierFrequency;
+    double carrierPhase;
+} QAM_properties_t;
+
+typedef struct
+{
+    double *buffer;        // a pointer to an array for storing samples
+    int length;             // the length of the buffer
+    int insertionIndex;     // the index where new data is inserted into the circular buffer
+    int phase;              // used for some functions choosing when to do periodic calculations with the buffer
+    int sampleRate;
+} circular_buffer_double_t;
+typedef struct
+{
+    double complex *buffer;// a pointer to an array for storing samples
+    int length;             // the length of the buffer
+    int insertionIndex;     // the index where new data is inserted into the circular buffer
+    int phase;              // used for some functions choosing when to do periodic calculations with the buffer
+    int sampleRate;
+    int n;                  // index of sample at insertionIndex
+} circular_buffer_complex_t;
+
+typedef enum
+{
+    RETURNED_SAMPLE,
+    AWAITING_SAMPLES,
+} buffered_data_return_t;
+
+
+buffered_data_return_t raisedCosFilter(circular_buffer_complex_t inputSamples, sample_complex_t *outputSample, debugPlots_t debugPlots)
+{
+    //int symbolPeriod = 64; // audio samples per symbol
+    int k = 4; // cycles per period
+    //int filterSides = 10;    // number of symbols to either side of current symbol to filter with raised cos
+    //int filterLengthSymbols = 2 * filterSides + 1;    // length of raised cos filter in IQ symbols, ie, how many IQ samples we need to generate the current symbol
+    //int filterLength = filterLengthSymbols * symbolPeriod;  // length in audio samples
+    double filterCutoffFrequency = 500. * 1.25; // cutoff frequency of the low pass filter
+    // array to store time series of filter data
+    static double *filter;
+    // array to store timeseries of IQ samples
+    //static double complex *IQdata;
+
+    static int initialized = 0;         // initialize the filter kernel first, and only once
+    static int bufferPrimed = 0;        // get enough samples to start processing them.
+    if(!initialized)
+    {
+        // initialize raised cos filter data
+        //filter = malloc(sizeof(double) * filterLength); // this never gets released. so, might wanna fix that TODO
+        filter = malloc(sizeof(double) * inputSamples.length);  // filter kernel = size of input buffer
+        for(int i = 0; i < inputSamples.length; i++)
+        {
+            int filterIndex = i - inputSamples.length / 2;    // should go -filterLength/2 -> 0 -> filterLength/2
+            // raised cos filter math
+            double b = 0.42;    // filter parameter beta, has to do with frequency falloff and time domain fall off
+            double filterValue = sin(2*M_PI * filterCutoffFrequency * filterIndex / inputSamples.sampleRate) / (2*M_PI * filterCutoffFrequency * filterIndex / inputSamples.sampleRate) * 
+                (cos(2*M_PI * filterCutoffFrequency * filterIndex / inputSamples.sampleRate * b)) / (1 - pow(4 * b * filterCutoffFrequency * filterIndex / inputSamples.sampleRate, 2));
+            if(!isfinite(filterValue))   // in case it's undefined, ie divide by zero case
+                filterValue = sin(M_PI / 2 / b) / (M_PI / 2 / b);
+            if(filterIndex == 0)
+                filterValue = 1;    // the math gives a divide by zero at index 0
+
+            filter[i] = filterValue;
+        }
+
+        // ensure initialize only runs once
+        initialized = 1;
+    }
+    // wait for enough samples to come in
+    if(!bufferPrimed)
+    {
+        // basically, we need to wait for future samples before we can filter the first sample. skip the remainder of this function until enough samples are collected.
+        if(inputSamples.insertionIndex < inputSamples.length / 2)    // filled the buffer half way, now ready to start processing
+            return AWAITING_SAMPLES;    // wait for samples
+        printf("started processing at n=%i\n", inputSamples.n);
+        bufferPrimed = 1;   // otherwise stop waiting and process
+    }
+
+    //int relativeSampleIndex = inputSamples.insertionIndex - inputSamples.length / 2;    // 0 is the 'current' time in the circular input buffer. negatives are into the past, positives are into the future
+    //  insertionIndex should the the index of the last inserted sample, inserted by the calling function
+    outputSample->sample = 0;
+    outputSample->sampleRate = inputSamples.sampleRate;
+    outputSample->sampleIndex = inputSamples.n - inputSamples.length / 2;   // the index is shifted by half the filter width
+    for(int i = 0; i < inputSamples.length; i++)
+    {
+        // calculate the convoution for the sample at relative index 0
+
+        // generate relative indexes
+        int relativeSampleIndex = i - inputSamples.length / 2;     // 0 is the 'current' time in the circular input buffer. negatives are into the past, positives are into the future
+        int relativeFilterIndex = -relativeSampleIndex;     // 0 is the center of the filter
+        
+        // generate absolute index positions
+        int sampleIndex = (relativeSampleIndex + inputSamples.insertionIndex - inputSamples.length / 2) % inputSamples.length;
+        if(sampleIndex < 0)
+            sampleIndex += inputSamples.length; // wrap negative indexes back around to positive values
+        int filterIndex = (relativeFilterIndex + inputSamples.length / 2) % inputSamples.length;
+        if(filterIndex < 0)
+            filterIndex += inputSamples.length; // wrap negative indexes back around to positive values
+
+        // calculate the multiplication and sumation
+        outputSample->sample += inputSamples.buffer[sampleIndex] * filter[filterIndex];
+        if(relativeSampleIndex == 0)
+            fprintf(debugPlots.filterDebugStdin, "%i %i %f %i %f %i %f\n", outputSample->sampleIndex, 1, creal(inputSamples.buffer[sampleIndex]), 2, cimag(inputSamples.buffer[sampleIndex]), 3, filter[outputSample->sampleIndex%inputSamples.length]);
+
+    }
+    //printf("output: n=%i, %f+%fi\n", inputSamples.n, creal(outputSample->sample), cimag(outputSample->sample));
+    outputSample->sample /= 24.;        // bit arbitrary, gotta figure out normalization factor for raised cos filter
+
+    // print out debug info for the filter
+    //fprintf(debugPlots.filterDebugStdin, "%i %i %f %i %f %i %f\n", inputSamples.n, 1, creal(inputSamples.buffer[inputSamples.insertionIndex]), 2, cimag(inputSamples.buffer[inputSamples.insertionIndex]), 3, filter[outputSample->sampleIndex%inputSamples.length]);
+    fprintf(debugPlots.filterDebugStdin, "%i %i %f %i %f\n", outputSample->sampleIndex, 6, creal(outputSample->sample), 7, cimag(outputSample->sample));
+
+
+    return RETURNED_SAMPLE;
+}
+
+void demodulateQAM(sample_double_t sample, QAM_properties_t QAMstate, debugPlots_t debugPlots)
+{
+    // currently does not handle samples after about half the filter size, instead just using them as future samples, but never getting to them. Should add a command to take care of the remainder I guess and cycle the filter function with zeros until it's done TODO
+    static int initialized = 0;
+    static circular_buffer_complex_t filterInputBuffer;
+    if(!initialized)
+    {
+        // initialization
+        filterInputBuffer.length = sample.sampleRate / QAMstate.carrierFrequency * 4 * (10 * 2 + 1);
+        //filterInputBuffer.buffer = malloc(sizeof(double complex) * filterInputBuffer.length);   // allocate some space for the buffer
+        filterInputBuffer.buffer = calloc(filterInputBuffer.length, sizeof(double complex));   // allocate some space for the buffer, and zero it
+        //printf("got %lu bytes from malloc\n", sizeof(double complex) * filterInputBuffer.length);
+        if(filterInputBuffer.buffer == NULL)
+            printf("NULL POINTER!!!\n");
+        // only run once
+        initialized = 1;
+    }
+
+    fprintf(debugPlots.filterDebugStdin, "%i %i %f\n", sample.sampleIndex, 0, sample.sample);
+
+    // IQ sampling
+    //  multiply by sin and cos
+    double complex wave = cexp(I*(2*M_PI * QAMstate.carrierFrequency * sample.sampleIndex / sample.sampleRate + QAMstate.carrierPhase));
+    double complex IQsample = sample.sample * wave;
+    fprintf(debugPlots.filterDebugStdin, "%i %i %f %i %f\n", sample.sampleIndex, 4, creal(wave), 5, cimag(wave));
+
+    //  low pass filter
+    //      convolution with a raised cos filter would probably do fine
+    filterInputBuffer.n = sample.sampleIndex;
+    filterInputBuffer.sampleRate = sample.sampleRate;
+    filterInputBuffer.phase = 0;
+    filterInputBuffer.buffer[filterInputBuffer.insertionIndex] = IQsample;
+    sample_complex_t filteredIQsample;
+    buffered_data_return_t returnValue = raisedCosFilter(filterInputBuffer, &filteredIQsample, debugPlots);
+    filterInputBuffer.insertionIndex = (filterInputBuffer.insertionIndex + 1) % filterInputBuffer.length;
+ }
+
+/*
+double complex demodulateOFDM(int n, double sample, OFDM_properties_t *OFDMstate, debugPlots_t debugPlots)
+{
+    // use the windowphase to adjust the buffer index position
+    //int bufferIndex = (n + windowPhase)%SYMBOL_PERIOD;
+    // Let's not use window phase to adjust index, and just pass the window phase to dft like a sane person
+    int bufferIndex = n % OFDMstate->symbolPeriod;
+
+    *OFDMstate->sampleBuffer[bufferIndex] = sample;
+
+    static double equalizationFactor = 1;   // used by the equalization PID loop to control the overall volume
+    static double RMSsamples[4] = {0};
+    double RMS;
+
+
+#if DEBUG_LEVEL > 0
+    // debug waveform plot
+    fprintf(debugPlots.waveformPlotStdin, "%i %f %f\n", n, *OFDMstate->sampleBuffer[bufferIndex], equalizationFactor);
+#endif
+
+    // array storing super sampled IQ values
+    // all the IQ samples stored in these bins.
+    //      0 - just before ideal midpoint
+    //      1 - just after ideal midpoint
+    //      2 - just before ideal
+    //      3 - just after ideal
+    static double complex IQsamples[4] = {0};
+
+    // interpolated value between two closest actual IQ samples
+    static double complex IQmidpoint = 0;   // between ideal sample times
+    static double complex IQ = 0;   // at ideal sample time
+    static double complex IQlast = 0;   // previous ideal sample time
+
+#if DEBUG_LEVEL > 0
+    // oversampling IQ values for a nice eye diagram to help debug stuff
+    double complex oversampledIQ = dft(*OFDMstate->sampleBuffer, OFDMstate->symbolPeriod, bufferIndex + 1, n%OFDMstate->symbolPeriod, 0., OFDMstate->k, &RMS, NODEBUG, NULL, n);
+    fprintf(debugPlots.eyeDiagramRealStdin, "%f %i %f\n", fmod((double)n / OFDMstate->symbolPeriod, 4), n / 4 / OFDMstate->symbolPeriod, creal(oversampledIQ));
+    fprintf(debugPlots.eyeDiagramImaginaryStdin, "%f %i %f\n", fmod((double)n / OFDMstate->symbolPeriod, 4), n / 4 / OFDMstate->symbolPeriod, cimag(oversampledIQ));
+#endif
+
+    // deciding when to take IQ samples
+    // take a sample right between the ideal samples which are taken at windowPhase
+    // if we are half full on the buffer, take an intermidiate IQ sample, for timing sync later
+    // compute DFT (rn just one freq, but when we implement OFDM, then at many harmonic(orthogonal) frequencies)
+    if(bufferIndex == ((int)floor(OFDMstate->windowPhaseReal) + OFDMstate->symbolPeriod / 2 - 1) % OFDMstate->symbolPeriod)    // just before real window phase offset midpoint
+        IQsamples[0] = dft(*OFDMstate->sampleBuffer,
+                           OFDMstate->symbolPeriod,
+                           bufferIndex + 1,
+                           (n+1)%OFDMstate->symbolPeriod,
+                           0.,
+                           OFDMstate->k,
+                           &RMSsamples[0],
+                           MIDPOINT,
+                           debugPlots.fftDebuggerStdin,
+                           n);
+
+    if(bufferIndex == ((int)ceil(OFDMstate->windowPhaseReal) + OFDMstate->symbolPeriod / 2 - 1) % OFDMstate->symbolPeriod)     // just after real window phase offset midpoint;
+        IQsamples[1] = dft(*OFDMstate->sampleBuffer,
+                           OFDMstate->symbolPeriod,
+                           bufferIndex + 1,
+                           (n+1)%OFDMstate->symbolPeriod,
+                           0.,
+                           OFDMstate->k,
+                           &RMSsamples[1],
+                           MIDPOINT,
+                           debugPlots.fftDebuggerStdin,
+                           n);
+
+    if(bufferIndex == ((int)floor(OFDMstate->windowPhaseReal) + OFDMstate->symbolPeriod - 1) % OFDMstate->symbolPeriod)        // just before real window phase offset
+        IQsamples[2] = dft(*OFDMstate->sampleBuffer,
+                           OFDMstate->symbolPeriod,
+                           bufferIndex + 1,
+                           (n+1)%OFDMstate->symbolPeriod,
+                           0.,
+                           OFDMstate->k,
+                           &RMSsamples[2],
+                           ALLIGNED,
+                           debugPlots.fftDebuggerStdin,
+                           n);
+
+    if(bufferIndex == ((int)ceil(OFDMstate->windowPhaseReal) + OFDMstate->symbolPeriod - 1) % OFDMstate->symbolPeriod)         // just after real window phase offset
+        IQsamples[3] = dft(*OFDMstate->sampleBuffer,
+                           OFDMstate->symbolPeriod,
+                           bufferIndex + 1,
+                           (n+1)%OFDMstate->symbolPeriod,
+                           0.,
+                           OFDMstate->k,
+                           &RMSsamples[3],
+                           ALLIGNED,
+                           debugPlots.fftDebuggerStdin,
+                           n);
+
+    // I added another condition to help debounce. sometimes it takes many samples in a row due to changing window offset
+    if((bufferIndex == ((int)ceil(OFDMstate->windowPhaseReal) + OFDMstate->symbolPeriod) % OFDMstate->symbolPeriod) && (n - tookSampleAt > OFDMstate->symbolPeriod / 2))  // just after real window phase offset, do the calculations that must be done once per symbol recieved
+    {
+        // interpolate IQ and IQmidpoint from actual IQ samples in IQsamples
+        // just doing linear interpolation
+        //      (slope) * interp_X + initial
+        //      (final - initial) * interp_X + initial
+        IQmidpoint =    (IQsamples[1] - IQsamples[0]) * fmod(OFDMstate->windowPhaseReal, 1) + IQsamples[0];
+        IQlast =        IQ;
+        IQ =            (IQsamples[3] - IQsamples[2]) * fmod(OFDMstate->windowPhaseReal, 1) + IQsamples[2];
+
+        tookSampleAt = n;
+
+        // now I'm doing a bunch of stuff that happens every IQ sample. This all happens in the timespan of a single audio sample, which is 1/symbolPeriod of the time between IQ samples that could be used, but whatever
+
+        // averaging filter for the equalizer
+        static double rmsaverageWindow[44100 * 2 / OFDMstate->symbolPeriod] = {0};
+        int rmsaverageSize = 44100 * 2 /OFDMstate->symbolPeriod;
+        int rmsaverageIndex = (n / OFDMstate->symbolPeriod) % rmsaverageSize;
+
+        RMS = 0;
+        for(int i = 0; i < 4; i++)
+        {
+            RMS += RMSsamples[i];
+        }
+        RMS /= 4;
+        rmsaverageWindow[rmsaverageIndex] = RMS;
+        double rmsaverage = 0;
+
+        for(int i = 0; i < rmsaverageSize; i++)
+        {
+            rmsaverage += rmsaverageWindow[i];
+        }
+        rmsaverage /= rmsaverageSize;
+        equalizationFactor += (1. / sqrt(2) - rmsaverage) * 0.002;
+        // PID for the equalizer, just proportional. with max
+        equalizationFactor = fmax(fmin(equalizationFactor, 10000), -10000);
+        fprintf(debugPlots.waveformPlotStdin, "%i %f %f %f\n", n, *OFDMstate->sampleBuffer[bufferIndex], equalizationFactor, rmsaverage);
+
+#if DEBUG_LEVEL > 0
+        equalizationFactor = 1;     // equalization factor needs to ignore low frequency signals that give DC offset
+        //equalizationFactor = 1./0.007;
+#endif
+
+        // try to get a phase lock, symbol time lock, frequency lock, and equalization
+        // calculate the error signal
+        // Gardner Algorithm: Real Part( derivitive of IQ times conjugate of IQ)
+        // boobs-alexis
+        // basically, it's trying to estimate the error of zero crossings
+        double phaseOffsetEstimate = creal((IQ - IQlast) * conj(IQmidpoint));
+
+#if DEBUG_LEVEL > 1
+        // imprint the phase offset estimate on the fftDebugger plot to help understand the relationship between the DFT and symbol sync algo
+        fprintf(debugPlots.fftDebuggerStdin, "%i %i %f %i %f\n", n, 10, phaseOffsetEstimate + 2, 15, (double)(n % OFDMstate->symbolPeriod) / OFDMstate->symbolPeriod + 2);
+#endif
+
+        // state of the timing lock to modulate PID params
+        static timing_lock_t lockstate = NO_LOCK;
+
+        // Process Variable (PV, ie phase estimate) filter
+        // rolling average of phase offset estimate
+        // this may need to be adjusted based on the state of symbol and phase lock achieved
+        static double averageWindow[64] = {0};
+        const int averageWindowArrayLength = 64;
+        static int averageSize;    // adjusted based on lock state
+        int averageIndex = (n / OFDMstate->symbolPeriod) % averageWindowArrayLength;
+        switch(lockstate)
+        {
+            case NO_LOCK:
+                // smaller averaging window to achieve
+                //  faster error signal response
+                //  for more aggressive PID tune
+                averageSize = 2;
+                break;
+            case SYMBOL_LOCK:
+            case PHASE_LOCK:
+                // longer average window to help average out symbol transitions that are not zero crossings
+                //  PID tune must be shittier
+                averageSize = 64;
+                break;
+        }
+
+        // add a sample and take the average of last averageSize samples
+        averageWindow[averageIndex] = phaseOffsetEstimate;
+        double average = 0;
+        // step backwards from current index to averageSize indexed back
+        for(int i = averageIndex; i > averageIndex - averageSize; i--)
+        {
+            if(i < 0)
+                average += averageWindow[averageWindowArrayLength + i];
+            average += averageWindow[i];
+        }
+        average /= averageSize;
+
+        // PID loop for symbol timing, ie aligning the fft window to the symbol transitions
+        static double P_gain;
+        static double I_gain;
+        static double D_gain;
+        switch(lockstate)
+        {
+            case NO_LOCK:
+                P_gain = 2.5;
+                I_gain = 0.003;
+                D_gain = 0;
+                break;
+            case SYMBOL_LOCK:
+            case PHASE_LOCK:
+                P_gain = 0.1;
+                I_gain = 0.001;
+                D_gain = 0;
+                break;
+        }
+
+        double error = 0 - average;
+        //error *= -1;
+        static double errorIntegral = 0;
+        errorIntegral += error;
+
+        static double lastError = 0;
+        double errorDerivative = error - lastError;
+        lastError = error;
+
+        // this may need to be adjusted based on the state of symbol and phase lock achieved
+        double phaseAdjustment = errorDerivative * D_gain + errorIntegral * I_gain + error * P_gain;
+
+        OFDMstate->windowPhaseReal += phaseAdjustment;
+        OFDMstate->windowPhaseReal = fmod(OFDMstate->windowPhaseReal + phaseAdjustment, OFDMstate->symbolPeriod);
+        OFDMstate->windowPhaseReal = OFDMstate->windowPhaseReal < 0 ? OFDMstate->symbolPeriod + OFDMstate->windowPhaseReal : OFDMstate->windowPhaseReal;
+        windowPhase = (int)round(OFDMstate->windowPhaseReal) % OFDMstate->symbolPeriod; // quantize the real window phase
+        //windowPhase = windowPhase < 0 ? OFDMstate->symbolPeriod + windowPhase : windowPhase;
+#if DEBUG_LEVEL > 0
+        // some options to overwrite the window phase given by the PID controller
+        //windowPhase = (n * 2 / 2000) % OFDMstate->symbolPeriod;
+        //windowPhase = (n * 4 * 2/ (OFDMstate->symbolPeriod * 2000) ) % 4 * OFDMstate->symbolPeriod / 4;
+        //windowPhase = OFDMstate->symbolPeriod / 4;
+        windowPhase = 0;
+        OFDMstate->windowPhaseReal = 0.0001;
+        //windowPhase = (int)((windowPhase + phaseAdjustment) < 0 ? (OFDMstate->symbolPeriod - windowPhase + phaseAdjustment) : (windowPhase + phaseAdjustment)) % OFDMstate->symbolPeriod;
+#endif
+
+        // extract the frequencies to be decoded
+        // add the relevant IQ values to an array
+        // plot the IQ and a tail with some kind of persistance to give an animated output
+        //fprintf(debugPlots.IQplotStdin, "%f %f\n", I, Q);
+        //printf("%f %f\n", I, Q);
+
+        // plot with a new color for each window phase
+        fprintf(debugPlots.IQplotStdin, "%f %i %f\n", creal(IQ), windowPhase, cimag(IQ));
+        //fprintf(debugPlots.IQplotStdin, "%f %i %f\n", creal(IQmidpoint), windowPhase + OFDMstate->symbolPeriod, cimag(IQmidpoint));
+        fprintf(debugPlots.errorPlotStdin, "%i, %f %f %f %f %f\n", n / OFDMstate->symbolPeriod, -phaseOffsetEstimate, error, phaseAdjustment, (double)windowPhase / OFDMstate->symbolPeriod, OFDMstate->windowPhaseReal / OFDMstate->symbolPeriod);
+        //fprintf(debugPlots.IQvstimeStdin, "%i, %f, %f, %f, %f, %f, %f\n", n / OFDMstate->symbolPeriod % (2*3), creal(IQ), cimag(IQ), creal(IQlast), cimag(IQlast), creal(IQmidpoint), cimag(IQmidpoint));
+        fprintf(debugPlots.IQvstimeStdin, "%f, %f, %f\n", (n / OFDMstate->symbolPeriod) % (2*3) + 0., creal(IQ), cimag(IQ));
+        fprintf(debugPlots.IQvstimeStdin, "%f, %f, %f\n", (n / OFDMstate->symbolPeriod) % (2*3) + 0.5, creal(IQmidpoint), cimag(IQmidpoint));
+    }
+}
+*/
+
 int main(void)
 {
     // length of each symbol in samples, and so the fft window.
@@ -163,7 +597,8 @@ int main(void)
     //int guardPeriod = 4./1000 * 44100;      // 4ms guard period for room echos
     //int guardPeriod = 0;
     //int totalPeriod = SYMBOL_PERIOD + guardPeriod;
-    sample32_t sample;
+    sample_32_converter_t sampleConvert;
+    sample_double_t sample;
 
     // the offset of sample buffer or fftwindow in time, to get symbol time sync
     int windowPhase = 0;
@@ -176,15 +611,8 @@ int main(void)
     // prepare file descriptors for output files and streams
     int retval = 0;
 
-    FILE* waveformPlotStdin = NULL;
-    FILE* fftDebuggerStdin = NULL;
-    FILE* errorPlotStdin = NULL;
+    debugPlots_t debugPlots;    // holds all the file descriptors for plots
     char *iq_plot_buffer = NULL;
-    FILE* IQplotStdin = NULL;
-    FILE* IQvstimeStdin = NULL;
-    FILE* eyeDiagramRealStdin = NULL;
-    FILE* eyeDiagramImaginaryStdin = NULL;
-
 
     // process arguments
     //  none right now
@@ -200,9 +628,9 @@ int main(void)
     ;
 
     // using it to plot the time domain signal
-    waveformPlotStdin = popen(plot, "w");
+    debugPlots.waveformPlotStdin = popen(plot, "w");
 
-    if (waveformPlotStdin == NULL)
+    if (debugPlots.waveformPlotStdin == NULL)
     {
         fprintf(stderr, "Failed to create waveform plot: %s\n", strerror(errno));
         retval = 1;
@@ -233,9 +661,9 @@ int main(void)
     ;
 
     // using it to plot the time domain signal
-    fftDebuggerStdin = popen(debugPlot, "w");
+    debugPlots.fftDebuggerStdin = popen(debugPlot, "w");
 
-    if (fftDebuggerStdin == NULL)
+    if (debugPlots.fftDebuggerStdin == NULL)
     {
         fprintf(stderr, "Failed to create fft debug plot: %s\n", strerror(errno));
         retval = 2;
@@ -254,9 +682,9 @@ int main(void)
     ;
 
     // using it to plot the time domain signal
-    errorPlotStdin = popen(errorPlot, "w");
+    debugPlots.errorPlotStdin = popen(errorPlot, "w");
 
-    if (errorPlotStdin == NULL)
+    if (debugPlots.errorPlotStdin == NULL)
     {
         fprintf(stderr, "Failed to create error plot: %s\n", strerror(errno));
         retval = 3;
@@ -321,13 +749,13 @@ int main(void)
         }
     }
 
-    IQplotStdin = popen(iq_plot_buffer, "w");
+    debugPlots.IQplotStdin = popen(iq_plot_buffer, "w");
 
     // Free buffer, even if popen failed
     free(iq_plot_buffer);
     iq_plot_buffer = NULL;
 
-    if (IQplotStdin == NULL)
+    if (debugPlots.IQplotStdin == NULL)
     {
         fprintf(stderr, "Failed to create IQ plot: %s\n", strerror(errno));
         retval = 6;
@@ -343,7 +771,7 @@ int main(void)
         "--title \"Eye Diagram, Real part\" "
         "--xlabel \"Time (Audio sample #)\" --ylabel \"I\" ",
         3000);
-    eyeDiagramRealStdin = popen(eyeDiagramPlotReal, "w");
+    debugPlots.eyeDiagramRealStdin = popen(eyeDiagramPlotReal, "w");
 
     char eyeDiagramPlotImaginary[300] = {0};
     sprintf(
@@ -353,286 +781,71 @@ int main(void)
         "--title \"Eye Diagram, Imaginary part\" "
         "--xlabel \"Time (Audio sample #)\" --ylabel \"Q\" ",
         3000);
-    eyeDiagramImaginaryStdin = popen(eyeDiagramPlotImaginary, "w");
+    debugPlots.eyeDiagramImaginaryStdin = popen(eyeDiagramPlotImaginary, "w");
 
     // using it to plot the time domain signal
-    IQvstimeStdin = popen(eyeDiagramPlotReal, "w");
+    debugPlots.IQvstimeStdin = popen(eyeDiagramPlotReal, "w");
 
-    if (IQvstimeStdin == NULL)
+    if (debugPlots.IQvstimeStdin == NULL)
     {
         fprintf(stderr, "Failed to create IQ vs Time plot: %s\n", strerror(errno));
         retval = 7;
         goto exit;
     }
 
-    // I just realized this whole loop will not really work for QAM signals, I should be using
-    // a continuous sin cos multiplier for IQ sampling, not a DFT.
-    // and it's not quite right for OFDM since we don't have a guard period yet, but it's closer to
-    // that than qam.
-    // while there is data to recieve, not end of file -> right now just a fixed number of 2000
-    for(int audioSampleIndex = 0; audioSampleIndex < SYMBOL_PERIOD * 2000; audioSampleIndex++)
+    char *filterDebugPlot = 
+        "feedgnuplot "
+        "--domain --dataid --lines --points "
+        "--title \"Filter debugging plot\" "
+        "--xlabel \"Time (Audio sample #)\" --ylabel \"value\" "
+        "--legend 0 \"Original Audio samples\" "
+        "--legend 1 \"Original I\" "
+        "--legend 2 \"Original Q\" "
+        "--legend 3 \"Filter array\" "
+        "--legend 4 \"IQ sampler internal exponential real part\" "
+        "--legend 5 \"IQ sampler internal exponential imaginary part\" "
+        "--legend 6 \"Filtered I\" "
+        "--legend 7 \"Filtered Q\" "
+
+    ;
+    debugPlots.filterDebugStdin = popen(filterDebugPlot, "w");
+    if(debugPlots.filterDebugStdin == NULL)
     {
-        // gonna do something hacky here I think. if we are in a guard period, I'm just not gonna process that sample at all, and not going to index it.
-        // No I'm not. This is the point where QAM deviates from OFDM. In QAM, we use raised cosine filter or matched root raised cosine filters
-        // to combat inter symbol interference (ISI), but in OFDM, we use guard periods. the two are not interchangable because guard periods
-        // mess up the gardner algorithm's time synchronization method in QAM, and raised cosine filters mess up the orthogonality between OFDM channels.
-        // raised cos filter also causes ISI in back to back OFDM symbols because it blends them together at the symbol edges. I need a totally different IQ sampling scheme for
-        // QAM. Continuous IQ sampling rather than DFT sampling
-        int n = audioSampleIndex;
+        fprintf(stderr, "Failed to create filter debug plot: %s\n", strerror(errno));
+        retval = 8;
+        goto exit;
+    }
 
-        // use the windowphase to adjust the buffer index position
-        //int bufferIndex = (n + windowPhase)%SYMBOL_PERIOD;
-        // Let's not use window phase to adjust index, and just pass the window phase to dft like a sane person
-        int bufferIndex = n % SYMBOL_PERIOD;
 
+    // while there is data to recieve, not end of file -> right now just a fixed number of 2000
+    for(int audioSampleIndex = 0; audioSampleIndex < SYMBOL_PERIOD * 200; audioSampleIndex++)
+    {
         // recieve data on stdin, signed 32bit integer
-        for(size_t i = 0; i < sizeof(sample.value); i++)
+        for(size_t i = 0; i < sizeof(sampleConvert.value); i++)
         {
             // get the bytes, little endian, of signed 32bit integer, using the struct to do type punning
-            sample.byte[i] = getchar();
+            sampleConvert.byte[i] = getchar();
         }
 
-        static double equalizationFactor = 1;   // used by the equalization PID loop to control the overall volume
-        static double RMSsamples[4] = {0};
-        double RMS;
 
         // convert to a double ranged from -1 to 1
-        sampleBuffer[bufferIndex] = (double)sample.value / INT32_MAX * equalizationFactor;
+        sample.sample = (double)sampleConvert.value / INT32_MAX;
+        sample.sampleRate = 44100;
+        sample.sampleIndex = audioSampleIndex;
 
-    #if DEBUG_LEVEL > 0
-        // debug waveform plot
-        fprintf(waveformPlotStdin, "%i %f %f\n", n, sampleBuffer[bufferIndex], equalizationFactor);
-    #endif
+        fprintf(debugPlots.waveformPlotStdin, "%i %f\n", sample.sampleIndex, sample.sample);
 
-        // array storing super sampled IQ values
-        // all the IQ samples stored in these bins.
-        //      0 - just before ideal midpoint
-        //      1 - just after ideal midpoint
-        //      2 - just before ideal
-        //      3 - just after ideal
-        static double complex IQsamples[4] = {0};
+        QAM_properties_t QAMstate;
+        QAMstate.carrierFrequency = 500;
+        QAMstate.carrierPhase = 0;
+        demodulateQAM(sample, QAMstate, debugPlots);
 
-        // interpolated value between two closest actual IQ samples
-        static double complex IQmidpoint = 0;   // between ideal sample times
-        static double complex IQ = 0;   // at ideal sample time
-        static double complex IQlast = 0;   // previous ideal sample time
 
-    #if DEBUG_LEVEL > 0
-        // oversampling IQ values for a nice eye diagram to help debug stuff
-        double complex oversampledIQ = dft(sampleBuffer, SYMBOL_PERIOD, bufferIndex + 1, n%SYMBOL_PERIOD, 0., k, &RMS, NODEBUG, NULL, n);
-        fprintf(eyeDiagramRealStdin, "%f %i %f\n", fmod((double)n / SYMBOL_PERIOD, 4), n / 4 / SYMBOL_PERIOD, creal(oversampledIQ));
-        fprintf(eyeDiagramImaginaryStdin, "%f %i %f\n", fmod((double)n / SYMBOL_PERIOD, 4), n / 4 / SYMBOL_PERIOD, cimag(oversampledIQ));
-    #endif
+        //OFDM_properties_t OFDMdemodulateState = {SYMBOL_PERIOD, &sampleBuffer, k};
+        //demodulateOFDM(n, sampleDouble, &OFDMdemodulateState, &debugPlots);
 
-        // deciding when to take IQ samples
-        // take a sample right between the ideal samples which are taken at windowPhase
-        // if we are half full on the buffer, take an intermidiate IQ sample, for timing sync later
-        // compute DFT (rn just one freq, but when we implement OFDM, then at many harmonic(orthogonal) frequencies)
-        if(bufferIndex == ((int)floor(windowPhaseReal) + SYMBOL_PERIOD / 2 - 1) % SYMBOL_PERIOD)    // just before real window phase offset midpoint
-            IQsamples[0] = dft(sampleBuffer,
-                               SYMBOL_PERIOD,
-                               bufferIndex + 1,
-                               (n+1)%SYMBOL_PERIOD,
-                               0.,
-                               k,
-                               &RMSsamples[0],
-                               MIDPOINT,
-                               fftDebuggerStdin,
-                               n);
-
-        if(bufferIndex == ((int)ceil(windowPhaseReal) + SYMBOL_PERIOD / 2 - 1) % SYMBOL_PERIOD)     // just after real window phase offset midpoint;
-            IQsamples[1] = dft(sampleBuffer,
-                               SYMBOL_PERIOD,
-                               bufferIndex + 1,
-                               (n+1)%SYMBOL_PERIOD,
-                               0.,
-                               k,
-                               &RMSsamples[1],
-                               MIDPOINT,
-                               fftDebuggerStdin,
-                               n);
-
-        if(bufferIndex == ((int)floor(windowPhaseReal) + SYMBOL_PERIOD - 1) % SYMBOL_PERIOD)        // just before real window phase offset
-            IQsamples[2] = dft(sampleBuffer,
-                               SYMBOL_PERIOD,
-                               bufferIndex + 1,
-                               (n+1)%SYMBOL_PERIOD,
-                               0.,
-                               k,
-                               &RMSsamples[2],
-                               ALLIGNED,
-                               fftDebuggerStdin,
-                               n);
-
-        if(bufferIndex == ((int)ceil(windowPhaseReal) + SYMBOL_PERIOD - 1) % SYMBOL_PERIOD)         // just after real window phase offset
-            IQsamples[3] = dft(sampleBuffer,
-                               SYMBOL_PERIOD,
-                               bufferIndex + 1,
-                               (n+1)%SYMBOL_PERIOD,
-                               0.,
-                               k,
-                               &RMSsamples[3],
-                               ALLIGNED,
-                               fftDebuggerStdin,
-                               n);
-
-        // I added another condition to help debounce. sometimes it takes many samples in a row due to changing window offset
-        if((bufferIndex == ((int)ceil(windowPhaseReal) + SYMBOL_PERIOD) % SYMBOL_PERIOD) && (n - tookSampleAt > SYMBOL_PERIOD / 2))  // just after real window phase offset, do the calculations that must be done once per symbol recieved
-        {
-            // interpolate IQ and IQmidpoint from actual IQ samples in IQsamples
-            // just doing linear interpolation
-            //      (slope) * interp_X + initial
-            //      (final - initial) * interp_X + initial
-            IQmidpoint =    (IQsamples[1] - IQsamples[0]) * fmod(windowPhaseReal, 1) + IQsamples[0];
-            IQlast =        IQ;
-            IQ =            (IQsamples[3] - IQsamples[2]) * fmod(windowPhaseReal, 1) + IQsamples[2];
-
-            tookSampleAt = n;
-
-            // now I'm doing a bunch of stuff that happens every IQ sample. This all happens in the timespan of a single audio sample, which is 1/symbolPeriod of the time between IQ samples that could be used, but whatever
-
-            // averaging filter for the equalizer
-            static double rmsaverageWindow[44100 * 2 / SYMBOL_PERIOD] = {0};
-            int rmsaverageSize = 44100 * 2 /SYMBOL_PERIOD;
-            int rmsaverageIndex = (n / SYMBOL_PERIOD) % rmsaverageSize;
-
-            RMS = 0;
-            for(int i = 0; i < 4; i++)
-            {
-                RMS += RMSsamples[i];
-            }
-            RMS /= 4;
-            rmsaverageWindow[rmsaverageIndex] = RMS;
-            double rmsaverage = 0;
-
-            for(int i = 0; i < rmsaverageSize; i++)
-            {
-                rmsaverage += rmsaverageWindow[i];
-            }
-            rmsaverage /= rmsaverageSize;
-            equalizationFactor += (1. / sqrt(2) - rmsaverage) * 0.002;
-            // PID for the equalizer, just proportional. with max
-            equalizationFactor = fmax(fmin(equalizationFactor, 10000), -10000);
-            fprintf(waveformPlotStdin, "%i %f %f %f\n", n, sampleBuffer[bufferIndex], equalizationFactor, rmsaverage);
-
-        #if DEBUG_LEVEL > 0
-            equalizationFactor = 1;     // equalization factor needs to ignore low frequency signals that give DC offset
-            //equalizationFactor = 1./0.007;
-        #endif
-
-            // try to get a phase lock, symbol time lock, frequency lock, and equalization
-            // calculate the error signal
-            // Gardner Algorithm: Real Part( derivitive of IQ times conjugate of IQ)
-            // boobs-alexis
-            // basically, it's trying to estimate the error of zero crossings
-            double phaseOffsetEstimate = creal((IQ - IQlast) * conj(IQmidpoint));
-
-        #if DEBUG_LEVEL > 1
-            // imprint the phase offset estimate on the fftDebugger plot to help understand the relationship between the DFT and symbol sync algo
-            fprintf(fftDebuggerStdin, "%i %i %f %i %f\n", n, 10, phaseOffsetEstimate + 2, 15, (double)(n % SYMBOL_PERIOD) / SYMBOL_PERIOD + 2);
-        #endif
-
-            // state of the timing lock to modulate PID params
-            static timing_lock_t lockstate = NO_LOCK;
-
-            // Process Variable (PV, ie phase estimate) filter
-            // rolling average of phase offset estimate
-            // this may need to be adjusted based on the state of symbol and phase lock achieved
-            static double averageWindow[64] = {0};
-            const int averageWindowArrayLength = 64;
-            static int averageSize;    // adjusted based on lock state
-            int averageIndex = (n / SYMBOL_PERIOD) % averageWindowArrayLength;
-            switch(lockstate)
-            {
-                case NO_LOCK:
-                    // smaller averaging window to achieve
-                    //  faster error signal response
-                    //  for more aggressive PID tune
-                    averageSize = 2;
-                    break;
-                case SYMBOL_LOCK:
-                case PHASE_LOCK:
-                    // longer average window to help average out symbol transitions that are not zero crossings
-                    //  PID tune must be shittier
-                    averageSize = 64;
-                    break;
-            }
-
-            // add a sample and take the average of last averageSize samples
-            averageWindow[averageIndex] = phaseOffsetEstimate;
-            double average = 0;
-            // step backwards from current index to averageSize indexed back
-            for(int i = averageIndex; i > averageIndex - averageSize; i--)
-            {
-                if(i < 0)
-                    average += averageWindow[averageWindowArrayLength + i];
-                average += averageWindow[i];
-            }
-            average /= averageSize;
-
-            // PID loop for symbol timing, ie aligning the fft window to the symbol transitions
-            static double P_gain;
-            static double I_gain;
-            static double D_gain;
-            switch(lockstate)
-            {
-                case NO_LOCK:
-                    P_gain = 2.5;
-                    I_gain = 0.003;
-                    D_gain = 0;
-                    break;
-                case SYMBOL_LOCK:
-                case PHASE_LOCK:
-                    P_gain = 0.1;
-                    I_gain = 0.001;
-                    D_gain = 0;
-                    break;
-            }
-
-            double error = 0 - average;
-            //error *= -1;
-            static double errorIntegral = 0;
-            errorIntegral += error;
-
-            static double lastError = 0;
-            double errorDerivative = error - lastError;
-            lastError = error;
-
-            // this may need to be adjusted based on the state of symbol and phase lock achieved
-            double phaseAdjustment = errorDerivative * D_gain + errorIntegral * I_gain + error * P_gain;
-
-            windowPhaseReal += phaseAdjustment;
-            windowPhaseReal = fmod(windowPhaseReal + phaseAdjustment, SYMBOL_PERIOD);
-            windowPhaseReal = windowPhaseReal < 0 ? SYMBOL_PERIOD + windowPhaseReal : windowPhaseReal;
-            windowPhase = (int)round(windowPhaseReal) % SYMBOL_PERIOD; // quantize the real window phase
-            //windowPhase = windowPhase < 0 ? SYMBOL_PERIOD + windowPhase : windowPhase;
-        #if DEBUG_LEVEL > 0
-            // some options to overwrite the window phase given by the PID controller
-            //windowPhase = (n * 2 / 2000) % SYMBOL_PERIOD;
-            //windowPhase = (n * 4 * 2/ (SYMBOL_PERIOD * 2000) ) % 4 * SYMBOL_PERIOD / 4;
-            //windowPhase = SYMBOL_PERIOD / 4;
-            windowPhase = 0;
-            windowPhaseReal = 0.0001;
-            //windowPhase = (int)((windowPhase + phaseAdjustment) < 0 ? (SYMBOL_PERIOD - windowPhase + phaseAdjustment) : (windowPhase + phaseAdjustment)) % SYMBOL_PERIOD;
-        #endif
-
-            // extract the frequencies to be decoded
-            // add the relevant IQ values to an array
-            // plot the IQ and a tail with some kind of persistance to give an animated output
-            //fprintf(IQplotStdin, "%f %f\n", I, Q);
-            //printf("%f %f\n", I, Q);
-
-            // plot with a new color for each window phase
-            fprintf(IQplotStdin, "%f %i %f\n", creal(IQ), windowPhase, cimag(IQ));
-            //fprintf(IQplotStdin, "%f %i %f\n", creal(IQmidpoint), windowPhase + SYMBOL_PERIOD, cimag(IQmidpoint));
-            fprintf(errorPlotStdin, "%i, %f %f %f %f %f\n", n / SYMBOL_PERIOD, -phaseOffsetEstimate, error, phaseAdjustment, (double)windowPhase / SYMBOL_PERIOD, windowPhaseReal / SYMBOL_PERIOD);
-            //fprintf(IQvstimeStdin, "%i, %f, %f, %f, %f, %f, %f\n", n / SYMBOL_PERIOD % (2*3), creal(IQ), cimag(IQ), creal(IQlast), cimag(IQlast), creal(IQmidpoint), cimag(IQmidpoint));
-            fprintf(IQvstimeStdin, "%f, %f, %f\n", (n / SYMBOL_PERIOD) % (2*3) + 0., creal(IQ), cimag(IQ));
-            fprintf(IQvstimeStdin, "%f, %f, %f\n", (n / SYMBOL_PERIOD) % (2*3) + 0.5, creal(IQmidpoint), cimag(IQmidpoint));
-        }
-
-         // I think I'll use feedgnuplot, so pipe the IQ values into feedgnuplot
     }
+
 
 exit:
     if (iq_plot_buffer != NULL)
@@ -642,43 +855,48 @@ exit:
     }
 
     // close the streams, allowing the plots to render and open a window, then wait for them to terminate in separate threads.
-    if((IQvstimeStdin != NULL) && (fork() == 0))
+    if((debugPlots.IQvstimeStdin != NULL) && (fork() == 0))
     {
-        pclose(IQvstimeStdin);
+        pclose(debugPlots.IQvstimeStdin);
         return 0;
     }
 
-    if((IQplotStdin != NULL) && (fork() == 0))
+    if((debugPlots.IQplotStdin != NULL) && (fork() == 0))
     {
-        pclose(IQplotStdin);
+        pclose(debugPlots.IQplotStdin);
         return 0;
     }
 
-    if((errorPlotStdin != NULL) && (fork() == 0))
+    if((debugPlots.errorPlotStdin != NULL) && (fork() == 0))
     {
-        pclose(errorPlotStdin);
+        pclose(debugPlots.errorPlotStdin);
         return 0;
     }
 
-    if((waveformPlotStdin != NULL) && (fork() == 0))
+    if((debugPlots.waveformPlotStdin != NULL) && (fork() == 0))
     {
-        pclose(waveformPlotStdin);
+        pclose(debugPlots.waveformPlotStdin);
         return 0;
     }
 
-    if((fftDebuggerStdin != NULL) && (fork() == 0))
+    if((debugPlots.fftDebuggerStdin != NULL) && (fork() == 0))
     {
-        pclose(fftDebuggerStdin);
+        pclose(debugPlots.fftDebuggerStdin);
         return 0;
     }
-    if((eyeDiagramRealStdin != NULL) && (fork() == 0))
+    if((debugPlots.eyeDiagramRealStdin != NULL) && (fork() == 0))
     {
-        pclose(eyeDiagramRealStdin);
+        pclose(debugPlots.eyeDiagramRealStdin);
         return 0;
     }
-    if((eyeDiagramImaginaryStdin != NULL) && (fork() == 0))
+    if((debugPlots.eyeDiagramImaginaryStdin != NULL) && (fork() == 0))
     {
-        pclose(eyeDiagramImaginaryStdin);
+        pclose(debugPlots.eyeDiagramImaginaryStdin);
+        return 0;
+    }
+    if((debugPlots.filterDebugStdin != NULL) && (fork() == 0))
+    {
+        pclose(debugPlots.filterDebugStdin);
         return 0;
     }
 

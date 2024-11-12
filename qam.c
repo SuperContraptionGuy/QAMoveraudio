@@ -54,8 +54,8 @@ typedef struct
 // some functions to generate IQ streams with different properties
 iqsample_t alternateI(int symbolIndex)
 {
-    //iqsample_t sample = {symbolIndex % 2 * 2 - 1, 0};
-    iqsample_t sample = {symbolIndex % 2, 0};
+    iqsample_t sample = {symbolIndex % 2 * 2 - 1, 0};
+    //iqsample_t sample = {symbolIndex % 2, 0};
     return sample;
 }
 
@@ -95,8 +95,10 @@ iqsample_t sequentialIQ(int symbolIndex, int square)
 
 double raisedCosQAM(int n, int sampleRate)
 {
-    int symbolPeriod = 64; // audio samples per symbol
+    double carrierFrequency = 500;
+    //int symbolPeriod = 64; // audio samples per symbol
     int k = 4; // cycles per period
+    int symbolPeriod = sampleRate / carrierFrequency * k; // audio samples per symbol
     int filterSides = 10;    // number of symbols to either side of current symbol to filter with raised cos
     int filterLengthSymbols = 2 * filterSides + 1;    // length of raised cos filter in IQ symbols, ie, how many IQ samples we need to generate the current symbol
     int filterLength = filterLengthSymbols * symbolPeriod;  // length in audio samples
@@ -211,10 +213,10 @@ double raisedCosQAM(int n, int sampleRate)
 }
 
 // really this is generating a single OFDM channel without guard periods
-static double singleChannelODFM_noguard(int n)
+static double singleChannelODFM_noguard(int n, int sampleRate)
 {
     int symbolPeriod = 256;
-    //int guardPeriod = 4./1000 * 44100;     // I've found that the echos in a room last for about 3ms, durring that period, the symbol is phase offset and otherwise changed due to the last symbol and the transition between symbols
+    //int guardPeriod = 4./1000 * sampleRate;     // I've found that the echos in a room last for about 3ms, durring that period, the symbol is phase offset and otherwise changed due to the last symbol and the transition between symbols
     int guardPeriod = 0;    // have to disable for QAM, ie, set to 0, instead use a raised cosine filter for ISI combat
     int totalPeriod = symbolPeriod + guardPeriod;
     int k = 16;      // this is effectively the OFDM channel number, how many cycles per sample period
@@ -270,8 +272,15 @@ static double singleChannelODFM_noguard(int n)
 // this is the point where samples are generated
 static double WARN_UNUSED calculateSample(int n, int sampleRate)
 {
-    //return simpleQAM(n);
-    return raisedCosQAM(n, sampleRate);
+    //double amplitudeScaler = 0.1;
+    double amplitudeScaler = 1;
+    /*
+    if(n == 2500)
+        return 1;
+    return 0;
+    */
+    return raisedCosQAM(n, sampleRate) * amplitudeScaler;
+    //return singleChannelODFM_noguard(n, sampleRate) * amplitudeScaler;
 }
 
 // generates a .wav header of 44 bytes long
