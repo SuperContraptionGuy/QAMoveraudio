@@ -89,7 +89,7 @@ iqsample_t sequentialIQ(int symbolIndex, int square)
     iqsample_t symbol;
     // sequentially hit all the IQ values in order in the constelation defined by power
     symbol.I = (double)(symbolIndex % square) / (square - 1) * 2 - 1;
-    symbol.Q = (double)(symbolIndex / square) / (square - 1) * 2 - 1;
+    symbol.Q = (double)(symbolIndex / square % square) / (square - 1) * 2 - 1;
     return symbol;
 }
 
@@ -97,7 +97,7 @@ double raisedCosQAM(int n, int sampleRate)
 {
     double carrierFrequency = 500;
     //int symbolPeriod = 64; // audio samples per symbol
-    int k = 4; // cycles per period
+    int k = 1; // cycles per period
     int symbolPeriod = sampleRate / carrierFrequency * k; // audio samples per symbol
     int filterSides = 10;    // number of symbols to either side of current symbol to filter with raised cos
     int filterLengthSymbols = 2 * filterSides + 1;    // length of raised cos filter in IQ symbols, ie, how many IQ samples we need to generate the current symbol
@@ -145,8 +145,9 @@ double raisedCosQAM(int n, int sampleRate)
                 IQdata[IQIndex % filterLengthSymbols] = sample; // the negative time samples are 0
             } else {
                 //IQdata[IQIndex % filterLengthSymbols] = alternateI(IQIndex);
-                IQdata[IQIndex % filterLengthSymbols] = randomQAM(IQIndex, 2);
-                //IQdata[IQIndex % filterLengthSymbols] = randomQAM_withPreamble(IQIndex, 2);
+                //IQdata[IQIndex % filterLengthSymbols] = randomQAM(IQIndex, 2);
+                //IQdata[IQIndex % filterLengthSymbols] = sequentialIQ(IQIndex, 4);
+                IQdata[IQIndex % filterLengthSymbols] = randomQAM_withPreamble(IQIndex, 2);
             }
         }
 
@@ -164,9 +165,10 @@ double raisedCosQAM(int n, int sampleRate)
     //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = alternateI(symbolIndex + filterLengthSymbols / 2);
     if(sampleIndex == 0)
     {
-        IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = randomQAM(symbolIndex + filterLengthSymbols / 2, 2);
-        //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = randomQAM_withPreamble(symbolIndex + filterLengthSymbols / 2, 2);
         //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = alternateI(symbolIndex + filterLengthSymbols / 2);
+        //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = randomQAM(symbolIndex + filterLengthSymbols / 2, 2);
+        //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = sequentialIQ(symbolIndex + filterLengthSymbols / 2, 4);
+        IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = randomQAM_withPreamble(symbolIndex + filterLengthSymbols / 2, 2);
     }
 
     // add up raised cos contributions from all samples in the IQdata array

@@ -170,6 +170,23 @@ typedef struct
     FILE* eyeDiagramRealStdin;
     FILE* eyeDiagramImaginaryStdin;
     FILE* filterDebugStdin;
+    FILE* QAMdecoderStdin;
+    union
+    {
+        struct
+        {
+            unsigned int waveformEnabled            : 1;
+            unsigned int fftDebugEnabled            : 1;
+            unsigned int errorPlotEnabled           : 1;
+            unsigned int IQplotEnabled              : 1;
+            unsigned int IQvsTimeEnabled            : 1;
+            unsigned int eyeDiagramRealEnabled      : 1;
+            unsigned int eyeDiagramImaginaryEnabled : 1;
+            unsigned int filterDebugEnabled         : 1;
+            unsigned int QAMdecoderEnabled          : 1;
+        };
+            unsigned long int flags;
+    };
 } debugPlots_t;
 
 typedef struct
@@ -215,7 +232,7 @@ typedef enum
 buffered_data_return_t raisedCosFilter(circular_buffer_complex_t inputSamples, sample_complex_t *outputSample, debugPlots_t debugPlots)
 {
     //int symbolPeriod = 64; // audio samples per symbol
-    int k = 4; // cycles per period
+    int k = 1; // cycles per period
     //int filterSides = 10;    // number of symbols to either side of current symbol to filter with raised cos
     //int filterLengthSymbols = 2 * filterSides + 1;    // length of raised cos filter in IQ symbols, ie, how many IQ samples we need to generate the current symbol
     //int filterLength = filterLengthSymbols * symbolPeriod;  // length in audio samples
@@ -256,7 +273,7 @@ buffered_data_return_t raisedCosFilter(circular_buffer_complex_t inputSamples, s
         // basically, we need to wait for future samples before we can filter the first sample. skip the remainder of this function until enough samples are collected.
         if(inputSamples.insertionIndex < inputSamples.length / 2)    // filled the buffer half way, now ready to start processing
             return AWAITING_SAMPLES;    // wait for samples
-        printf("started processing at n=%i\n", inputSamples.n);
+
         bufferPrimed = 1;   // otherwise stop waiting and process
     }
 
@@ -283,7 +300,7 @@ buffered_data_return_t raisedCosFilter(circular_buffer_complex_t inputSamples, s
 
         // calculate the multiplication and sumation
         outputSample->sample += inputSamples.buffer[sampleIndex] * filter[filterIndex];
-        if(relativeSampleIndex == 0)
+        if(debugPlots.filterDebugEnabled && relativeSampleIndex == 0)
             fprintf(debugPlots.filterDebugStdin, "%i %i %f %i %f %i %f\n", outputSample->sampleIndex, 1, creal(inputSamples.buffer[sampleIndex]), 2, cimag(inputSamples.buffer[sampleIndex]), 3, filter[outputSample->sampleIndex%inputSamples.length]);
 
     }
@@ -292,8 +309,8 @@ buffered_data_return_t raisedCosFilter(circular_buffer_complex_t inputSamples, s
 
     // print out debug info for the filter
     //fprintf(debugPlots.filterDebugStdin, "%i %i %f %i %f %i %f\n", inputSamples.n, 1, creal(inputSamples.buffer[inputSamples.insertionIndex]), 2, cimag(inputSamples.buffer[inputSamples.insertionIndex]), 3, filter[outputSample->sampleIndex%inputSamples.length]);
-    fprintf(debugPlots.filterDebugStdin, "%i %i %f %i %f\n", outputSample->sampleIndex, 6, creal(outputSample->sample), 7, cimag(outputSample->sample));
-
+    if(debugPlots.filterDebugEnabled)
+        fprintf(debugPlots.filterDebugStdin, "%i %i %f %i %f\n", outputSample->sampleIndex, 6, creal(outputSample->sample), 7, cimag(outputSample->sample));
 
     return RETURNED_SAMPLE;
 }
@@ -316,13 +333,19 @@ void demodulateQAM(sample_double_t sample, QAM_properties_t QAMstate, debugPlots
         initialized = 1;
     }
 
-    fprintf(debugPlots.filterDebugStdin, "%i %i %f\n", sample.sampleIndex, 0, sample.sample);
+    if(debugPlots.QAMdecoderEnabled)
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", sample.sampleIndex, 0, sample.sample);
 
     // IQ sampling
     //  multiply by sin and cos
     double complex wave = cexp(I*(2*M_PI * QAMstate.carrierFrequency * sample.sampleIndex / sample.sampleRate + QAMstate.carrierPhase));
     double complex IQsample = sample.sample * wave;
-    fprintf(debugPlots.filterDebugStdin, "%i %i %f %i %f\n", sample.sampleIndex, 4, creal(wave), 5, cimag(wave));
+
+    if(debugPlots.filterDebugEnabled)
+    {
+        fprintf(debugPlots.filterDebugStdin, "%i %i %f\n", sample.sampleIndex, 0, sample.sample);
+        fprintf(debugPlots.filterDebugStdin, "%i %i %f %i %f\n", sample.sampleIndex, 4, creal(wave), 5, cimag(wave));
+    }
 
     //  low pass filter
     //      convolution with a raised cos filter would probably do fine
@@ -331,8 +354,17 @@ void demodulateQAM(sample_double_t sample, QAM_properties_t QAMstate, debugPlots
     filterInputBuffer.phase = 0;
     filterInputBuffer.buffer[filterInputBuffer.insertionIndex] = IQsample;
     sample_complex_t filteredIQsample;
+
+    // filter the IQ samples
     buffered_data_return_t returnValue = raisedCosFilter(filterInputBuffer, &filteredIQsample, debugPlots);
+
     filterInputBuffer.insertionIndex = (filterInputBuffer.insertionIndex + 1) % filterInputBuffer.length;
+
+    if(returnValue != RETURNED_SAMPLE) // don't continue processing unless a sample is returned
+        return;
+
+    if(debugPlots.QAMdecoderEnabled)
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f %i %f\n", filteredIQsample.sampleIndex, 5, creal(filteredIQsample.sample), 6, cimag(filteredIQsample.sample));
  }
 
 /*
@@ -816,9 +848,37 @@ int main(void)
         goto exit;
     }
 
+    char *QAMdemodulatePlot = 
+        "feedgnuplot "
+        "--domain --dataid --lines --points "
+        "--title \"QAM demodulation debug plot\" "
+        "--xlabel \"Time (sample index)\" --ylabel \"value\" "
+        "--legend 0 \"Original audio samples\" "
+        "--legend 1 \"IQ sampler internal exponential real part\" "
+        "--legend 2 \"IQ sampler internal exponential imaginary part\" "
+        "--legend 3 \"I prefilter\" "
+        "--legend 4 \"Q prefilter\" "
+        "--legend 5 \"I\" "
+        "--legend 6 \"Q\" "
+    ;
+    debugPlots.QAMdecoderStdin = popen(QAMdemodulatePlot, "w");
+    if(debugPlots.QAMdecoderStdin == NULL)
+    {
+        fprintf(stderr, "Failed to create QAM decoder debug plot: %s\n", strerror(errno));
+        retval = 9;
+        goto exit;
+    }
+
+    debugPlots.flags = 0;   // reset all the flags
+    
+    // set some debug flags
+    debugPlots.waveformEnabled = 1;
+    debugPlots.QAMdecoderEnabled = 1;
+    //debugPlots.filterDebugEnabled = 1;
+
 
     // while there is data to recieve, not end of file -> right now just a fixed number of 2000
-    for(int audioSampleIndex = 0; audioSampleIndex < SYMBOL_PERIOD * 200; audioSampleIndex++)
+    for(int audioSampleIndex = 0; audioSampleIndex < SYMBOL_PERIOD * 600; audioSampleIndex++)
     {
         // recieve data on stdin, signed 32bit integer
         for(size_t i = 0; i < sizeof(sampleConvert.value); i++)
@@ -833,7 +893,8 @@ int main(void)
         sample.sampleRate = 44100;
         sample.sampleIndex = audioSampleIndex;
 
-        fprintf(debugPlots.waveformPlotStdin, "%i %f\n", sample.sampleIndex, sample.sample);
+        if(debugPlots.waveformEnabled)
+            fprintf(debugPlots.waveformPlotStdin, "%i %f\n", sample.sampleIndex, sample.sample);
 
         QAM_properties_t QAMstate;
         QAMstate.carrierFrequency = 500;
