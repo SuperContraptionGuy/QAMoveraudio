@@ -201,7 +201,11 @@ typedef struct
 typedef struct
 {
     double carrierFrequency;
-    double carrierPhase;
+    double carrierPhase;            // probably not going to use in the end.
+    double complex IQsamplingTransform;         // used to transform the IQ samples to compensate for carrier phase and amplitude mismatches (ln(amp) + i*phase)
+    double k;  // number of carrier cycles per sample
+    double symbolPeriod;    // number of audio samples per symbol
+    double selectedIQsamples[4];    // the closest samples to ideal sample time and mid symbol sample time for gardner algorithm
 } QAM_properties_t;
 
 typedef struct
@@ -229,14 +233,15 @@ typedef enum
 } buffered_data_return_t;
 
 
-buffered_data_return_t raisedCosFilter(circular_buffer_complex_t inputSamples, sample_complex_t *outputSample, debugPlots_t debugPlots)
+buffered_data_return_t raisedCosFilter(circular_buffer_complex_t inputSamples, sample_complex_t *outputSample, double cutoffFrequency, debugPlots_t debugPlots)
 {
     //int symbolPeriod = 64; // audio samples per symbol
     int k = 1; // cycles per period
     //int filterSides = 10;    // number of symbols to either side of current symbol to filter with raised cos
     //int filterLengthSymbols = 2 * filterSides + 1;    // length of raised cos filter in IQ symbols, ie, how many IQ samples we need to generate the current symbol
     //int filterLength = filterLengthSymbols * symbolPeriod;  // length in audio samples
-    double filterCutoffFrequency = 500. * 1.25; // cutoff frequency of the low pass filter
+    //double filterCutoffFrequency = cutoffFrequency * 1.25; // cutoff frequency of the low pass filter
+    double filterCutoffFrequency = cutoffFrequency * 1.25; // cutoff frequency of the low pass filter
     // array to store time series of filter data
     static double *filter;
     // array to store timeseries of IQ samples
@@ -305,7 +310,7 @@ buffered_data_return_t raisedCosFilter(circular_buffer_complex_t inputSamples, s
 
     }
     //printf("output: n=%i, %f+%fi\n", inputSamples.n, creal(outputSample->sample), cimag(outputSample->sample));
-    outputSample->sample /= 24.;        // bit arbitrary, gotta figure out normalization factor for raised cos filter
+    //outputSample->sample /= 24.;        // bit arbitrary, gotta figure out normalization factor for raised cos filter
 
     // print out debug info for the filter
     //fprintf(debugPlots.filterDebugStdin, "%i %i %f %i %f %i %f\n", inputSamples.n, 1, creal(inputSamples.buffer[inputSamples.insertionIndex]), 2, cimag(inputSamples.buffer[inputSamples.insertionIndex]), 3, filter[outputSample->sampleIndex%inputSamples.length]);
@@ -315,20 +320,29 @@ buffered_data_return_t raisedCosFilter(circular_buffer_complex_t inputSamples, s
     return RETURNED_SAMPLE;
 }
 
-void demodulateQAM(sample_double_t sample, QAM_properties_t QAMstate, debugPlots_t debugPlots)
+buffered_data_return_t demodulateQAM(sample_double_t sample, QAM_properties_t QAMstate, debugPlots_t debugPlots)
 {
     // currently does not handle samples after about half the filter size, instead just using them as future samples, but never getting to them. Should add a command to take care of the remainder I guess and cycle the filter function with zeros until it's done TODO
     static int initialized = 0;
     static circular_buffer_complex_t filterInputBuffer;
+    static circular_buffer_complex_t timingSyncBuffer;
     if(!initialized)
     {
         // initialization
         filterInputBuffer.length = sample.sampleRate / QAMstate.carrierFrequency * 4 * (10 * 2 + 1);
+        filterInputBuffer.insertionIndex = 0;
         //filterInputBuffer.buffer = malloc(sizeof(double complex) * filterInputBuffer.length);   // allocate some space for the buffer
         filterInputBuffer.buffer = calloc(filterInputBuffer.length, sizeof(double complex));   // allocate some space for the buffer, and zero it
         //printf("got %lu bytes from malloc\n", sizeof(double complex) * filterInputBuffer.length);
         if(filterInputBuffer.buffer == NULL)
-            printf("NULL POINTER!!!\n");
+            fprintf(stderr, "FilterInputBuffer failed to allocate: %s\n", strerror(errno));
+
+        // initialize timing sync buffer
+        timingSyncBuffer.length = QAMstate.symbolPeriod * 2;    // give it some extra size.
+        timingSyncBuffer.insertionIndex = 0;
+        timingSyncBuffer.buffer = calloc(timingSyncBuffer.length, sizeof(double complex));
+        if(timingSyncBuffer.buffer == NULL)
+            fprintf(stderr, "TimingSyncBuffer failed to allocate: %s\n", strerror(errno));
         // only run once
         initialized = 1;
     }
@@ -338,6 +352,10 @@ void demodulateQAM(sample_double_t sample, QAM_properties_t QAMstate, debugPlots
 
     // IQ sampling
     //  multiply by sin and cos
+    //      this step may have issues as the carrier frequency comes up to a quarter of the sample rate, since
+    //      the multiplication step generates frequencies in the IQsample centered a  twice the original carrier 
+    //      frequency. The bandwidth of the signal on that elevated carrier may alias. I should double sample rate before this step,
+    //      then reduce the sample rate to fraction of the original after filtering out that high frequency stuff.
     double complex wave = cexp(I*(2*M_PI * QAMstate.carrierFrequency * sample.sampleIndex / sample.sampleRate + QAMstate.carrierPhase));
     double complex IQsample = sample.sample * wave;
 
@@ -356,16 +374,79 @@ void demodulateQAM(sample_double_t sample, QAM_properties_t QAMstate, debugPlots
     sample_complex_t filteredIQsample;
 
     // filter the IQ samples
-    buffered_data_return_t returnValue = raisedCosFilter(filterInputBuffer, &filteredIQsample, debugPlots);
+    buffered_data_return_t returnValue = raisedCosFilter(filterInputBuffer, &filteredIQsample, QAMstate.carrierFrequency, debugPlots);
 
     filterInputBuffer.insertionIndex = (filterInputBuffer.insertionIndex + 1) % filterInputBuffer.length;
 
     if(returnValue != RETURNED_SAMPLE) // don't continue processing unless a sample is returned
-        return;
+        return AWAITING_SAMPLES;
 
     if(debugPlots.QAMdecoderEnabled)
         fprintf(debugPlots.QAMdecoderStdin, "%i %i %f %i %f\n", filteredIQsample.sampleIndex, 5, creal(filteredIQsample.sample), 6, cimag(filteredIQsample.sample));
+
+    // now do some timing alignemnt.
+    //      I'm imagining a clock that counts up by a phase quantity scaled by the number of IQ samples elapsed. accumulates phase
+    //      The rate of phase change will be adjusted by a PLL
+    //      The zero crossing for the clock will be projected so that the two samples it falls between can be chosen.
+    //      I'll keep an array of past IQ samples to choose from.
+    //      The next filteredIQsample.sampleIndex where calculations will occur is calculated by the projection
+    //          concept after PLL updates during said calculations
+
+    // collect samples into a buffer
+    timingSyncBuffer.buffer[timingSyncBuffer.insertionIndex] = filteredIQsample.sample;
+    timingSyncBuffer.n = filteredIQsample.sampleIndex;
+    timingSyncBuffer.insertionIndex++;
+
+    // Choosing samples for timing lock and symbol detection
+    static double symbolSamplerAccumulatedPhase = 0;
+    static double symbolSamplerPhaseRate;
+    static int symbolSamplerNextIndex = 0;  // next index to trigger calculations, should be just after the ideal sample time.
+
+    if(timingSyncBuffer.n < symbolSamplerNextIndex) // check if it's too early
+        return AWAITING_SAMPLES;    // it's too early, wait till the right number of IQ samples has passed.
+    
+    if(symbolSamplerAccumulatedPhase == 0)
+    {
+        // initialize phase rate
+        symbolSamplerPhaseRate = QAMstate.symbolPeriod; // initialize the phase rate to the idealized value
+        symbolSamplerNextIndex = symbolSamplerPhaseRate;    // trigger calculations one period from now
+        return AWAITING_SAMPLES;
+    }
+
+    // Gardner Algorithm
+    //  this can happen just once per IQ symbol, so not every audio sample
+    int postIdealIndex =  timingSyncBuffer.insertionIndex - 1;
+    postIdealIndex =    postIdealIndex < 0 ? timingSyncBuffer.length + postIdealIndex : postIdealIndex;     // wrap to positive
+    int preIdealIndex = postIdealIndex - 1;
+    preIdealIndex =     preIdealIndex < 0 ? timingSyncBuffer.length + preIdealIndex : preIdealIndex;        // wrap
+    int postMidIndex =  postIdealIndex - QAMstate.symbolPeriod / 2;
+    postMidIndex =      postMidIndex < 0 ? timingSyncBuffer.length + postMidIndex : postMidIndex;           // wrap
+    int preMidIndex =   postMidIndex - 1;
+    preMidIndex =       preMidIndex < 0 ? timingSyncBuffer.length + preMidIndex : preMidIndex;              // wrap
+
+    //  Interpolation between samples
+    double complex IQmidpoint = (timingSyncBuffer.buffer[preMidIndex] - timingSyncBuffer.buffer[postMidIndex]) * modf(symbolSamplerAccumulatedPhase, NULL) + timingSyncBuffer.buffer[preMidIndex];
+    static double complex IQideal = 0;
+    double complex IQlast = IQideal;
+    IQideal = (timingSyncBuffer.buffer[preIdealIndex] - timingSyncBuffer.buffer[postIdealIndex]) * modf(symbolSamplerAccumulatedPhase, NULL) + timingSyncBuffer.buffer[preIdealIndex];
+
+    // calculate error signal
+    double symbolSamplerPhaseErrorEstimate = creal((IQideal - IQlast) * conj(IQmidpoint));  // this should get us a rough
+
+    if(debugPlots.QAMdecoderEnabled)
+    {
+        //fprintf(debugPlots.QAMdecoderStdin, "%i %i %f", 
+    }
+
+    // update the phase rate for symbol sampler
+
+    // Costas loop for Phase locking
+    //  happens every IQ symbol
+    
+    //outputSample = ;  // output the determined IQ data
+    return RETURNED_SAMPLE;
  }
+
 
 /*
 double complex demodulateOFDM(int n, double sample, OFDM_properties_t *OFDMstate, debugPlots_t debugPlots)
@@ -615,6 +696,7 @@ double complex demodulateOFDM(int n, double sample, OFDM_properties_t *OFDMstate
     }
 }
 */
+
 
 int main(void)
 {
@@ -873,7 +955,7 @@ int main(void)
     
     // set some debug flags
     debugPlots.waveformEnabled = 1;
-    debugPlots.QAMdecoderEnabled = 1;
+    //debugPlots.QAMdecoderEnabled = 1;
     //debugPlots.filterDebugEnabled = 1;
 
 
@@ -897,7 +979,7 @@ int main(void)
             fprintf(debugPlots.waveformPlotStdin, "%i %f\n", sample.sampleIndex, sample.sample);
 
         QAM_properties_t QAMstate;
-        QAMstate.carrierFrequency = 500;
+        QAMstate.carrierFrequency = (double)sample.sampleRate / 8;
         QAMstate.carrierPhase = 0;
         demodulateQAM(sample, QAMstate, debugPlots);
 

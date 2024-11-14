@@ -95,9 +95,16 @@ iqsample_t sequentialIQ(int symbolIndex, int square)
 
 double raisedCosQAM(int n, int sampleRate)
 {
-    double carrierFrequency = 500;
+    int carrierPeriod = 8;
+    //double carrierFrequency = 5000;
+    double carrierFrequency = (double)sampleRate / carrierPeriod;
+    //int carrierFrequency = sampleRate / carrierPeriod;
     //int symbolPeriod = 64; // audio samples per symbol
     int k = 1; // cycles per period
+    //double symbolPeriod = sampleRate / carrierFrequency * k; // audio samples per symbol
+    // This is a sorta bug. the fact that everything is based on these integers is an issue. I think it causes discretization of carrier
+    // frequency and symbol periods, which means the output frequency is not what you put in. for example, 5000 Hz input turns out to be
+    // about 5500 Hz actual
     int symbolPeriod = sampleRate / carrierFrequency * k; // audio samples per symbol
     int filterSides = 10;    // number of symbols to either side of current symbol to filter with raised cos
     int filterLengthSymbols = 2 * filterSides + 1;    // length of raised cos filter in IQ symbols, ie, how many IQ samples we need to generate the current symbol
@@ -158,6 +165,7 @@ double raisedCosQAM(int n, int sampleRate)
     // current symbol number
     int symbolIndex = n / symbolPeriod;
     int sampleIndex = n % symbolPeriod; // index of each sample in a symbol, where as n is increasing for the whole signal
+    //int sampleIndex = fmod(n, symbolPeriod); // index of each sample in a symbol, where as n is increasing for the whole signal
     // circular buffer index
     int IQsampleIndex = symbolIndex % filterLengthSymbols;    // IQdata[IQsampleIndex] is current IQ sample, indexes above are future IQdata and below past IQ data both wrapping around until the are filterLengthSymbols / 2 away from current sample index
     
@@ -385,7 +393,7 @@ static int WARN_UNUSED generateSamplesAndOutput(char* filenameInput)
     // audio sample rate
     int sampleRate = 44100;
     // total number of samples to generate
-    long length = 100000;
+    long length = sampleRate * 5;
     // the number of the current sample
     long n = 0;
 
