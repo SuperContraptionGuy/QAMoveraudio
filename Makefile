@@ -12,12 +12,28 @@ CFLAGS := \
 	-Wall \
 	-Wextra \
 	-Wstrict-prototypes \
+	-Wconversion \
+	-Wsign-conversion \
+	-Wformat-security \
+	-Wstack-protector \
 	-flto \
 	-g3 \
 	-std=gnu18 \
-	# -O3 \
+	-march=native \
+	-mtune=native \
+	-fstack-protector-all \
+	--param ssp-buffer-size=4 \
+	-fstack-clash-protection \
+	-fPIE \
+	-fPIC \
+	-ftrapv \
+	-D_FORTIFY_SOURCE=2 \
+	-fcf-protection=full \
+	-fsanitize=address \
+	# -O3
 
 LDFLAGS := \
+	-Wl,-z,relro,-z,now \
 	-lm
 
 .PHONY: all qam qamDecoder clean

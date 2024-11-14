@@ -395,7 +395,8 @@ buffered_data_return_t demodulateQAM(sample_double_t sample, QAM_properties_t QA
     // collect samples into a buffer
     timingSyncBuffer.buffer[timingSyncBuffer.insertionIndex] = filteredIQsample.sample;
     timingSyncBuffer.n = filteredIQsample.sampleIndex;
-    timingSyncBuffer.insertionIndex++;
+    timingSyncBuffer.insertionIndex = (timingSyncBuffer.insertionIndex + 1) % timingSyncBuffer.length;
+
 
     // Choosing samples for timing lock and symbol detection
     static double symbolSamplerAccumulatedPhase = 0;
@@ -740,6 +741,10 @@ int main(void)
         "--legend 0 \"Signal\" "
         "--legend 1 \"equalization factor\" "
     ;
+    //const char *plot = 
+        //"hexdump -C "
+        //"tee testoutput.txt"
+    //;
 
     // using it to plot the time domain signal
     debugPlots.waveformPlotStdin = popen(plot, "w");
@@ -955,8 +960,8 @@ int main(void)
     
     // set some debug flags
     debugPlots.waveformEnabled = 1;
-    //debugPlots.QAMdecoderEnabled = 1;
-    //debugPlots.filterDebugEnabled = 1;
+    debugPlots.QAMdecoderEnabled = 1;
+    debugPlots.filterDebugEnabled = 1;
 
 
     // while there is data to recieve, not end of file -> right now just a fixed number of 2000
@@ -981,6 +986,8 @@ int main(void)
         QAM_properties_t QAMstate;
         QAMstate.carrierFrequency = (double)sample.sampleRate / 8;
         QAMstate.carrierPhase = 0;
+        QAMstate.k = 1;
+        QAMstate.symbolPeriod = (int)(sample.sampleRate / QAMstate.carrierFrequency);
         demodulateQAM(sample, QAMstate, debugPlots);
 
 
