@@ -95,7 +95,7 @@ iqsample_t sequentialIQ(int symbolIndex, int square)
 
 double raisedCosQAM(int n, int sampleRate)
 {
-    int carrierPeriod = 8;
+    int carrierPeriod = 64;
     //double carrierFrequency = 5000;
     double carrierFrequency = (double)sampleRate / carrierPeriod;
     //int carrierFrequency = sampleRate / carrierPeriod;

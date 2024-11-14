@@ -400,12 +400,15 @@ buffered_data_return_t demodulateQAM(sample_double_t sample, QAM_properties_t QA
 
     // Choosing samples for timing lock and symbol detection
     static double symbolSamplerAccumulatedPhase = 0;
-    static double symbolSamplerPhaseRate;
+    static double symbolSamplerPhaseRate = 0;
     static int symbolSamplerNextIndex = 0;  // next index to trigger calculations, should be just after the ideal sample time.
 
     if(timingSyncBuffer.n < symbolSamplerNextIndex) // check if it's too early
         return AWAITING_SAMPLES;    // it's too early, wait till the right number of IQ samples has passed.
-    
+
+    symbolSamplerAccumulatedPhase += symbolSamplerPhaseRate;    // apply the phase offset
+    symbolSamplerNextIndex = (int)ceil(symbolSamplerAccumulatedPhase); // determine the next index to make calculations
+
     if(symbolSamplerAccumulatedPhase == 0)
     {
         // initialize phase rate
@@ -426,17 +429,24 @@ buffered_data_return_t demodulateQAM(sample_double_t sample, QAM_properties_t QA
     preMidIndex =       preMidIndex < 0 ? timingSyncBuffer.length + preMidIndex : preMidIndex;              // wrap
 
     //  Interpolation between samples
-    double complex IQmidpoint = (timingSyncBuffer.buffer[preMidIndex] - timingSyncBuffer.buffer[postMidIndex]) * modf(symbolSamplerAccumulatedPhase, NULL) + timingSyncBuffer.buffer[preMidIndex];
+    double complex IQmidpoint = (timingSyncBuffer.buffer[preMidIndex] - timingSyncBuffer.buffer[postMidIndex]) * fmod(symbolSamplerAccumulatedPhase, 1) + timingSyncBuffer.buffer[preMidIndex];
     static double complex IQideal = 0;
     double complex IQlast = IQideal;
-    IQideal = (timingSyncBuffer.buffer[preIdealIndex] - timingSyncBuffer.buffer[postIdealIndex]) * modf(symbolSamplerAccumulatedPhase, NULL) + timingSyncBuffer.buffer[preIdealIndex];
+    IQideal = (timingSyncBuffer.buffer[preIdealIndex] - timingSyncBuffer.buffer[postIdealIndex]) * fmod(symbolSamplerAccumulatedPhase, 1) + timingSyncBuffer.buffer[preIdealIndex];
 
     // calculate error signal
     double symbolSamplerPhaseErrorEstimate = creal((IQideal - IQlast) * conj(IQmidpoint));  // this should get us a rough
 
+    // this is shitty code, should be a function
+    // PID loop
+    static double integral = 0;
+    integral += symbolSamplerAccumulatedPhase;
+    symbolSamplerPhaseRate += integral * 0.00 + symbolSamplerPhaseErrorEstimate * 0.2;
+    symbolSamplerPhaseRate = fmin(fmax(symbolSamplerPhaseRate, (double)QAMstate.symbolPeriod / 1.5), (double)QAMstate.symbolPeriod * 1.5);
+
     if(debugPlots.QAMdecoderEnabled)
     {
-        //fprintf(debugPlots.QAMdecoderStdin, "%i %i %f", 
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f", timingSyncBuffer.n, 7, symbolSamplerPhaseErrorEstimate);
     }
 
     // update the phase rate for symbol sampler
@@ -947,6 +957,7 @@ int main(void)
         "--legend 4 \"Q prefilter\" "
         "--legend 5 \"I\" "
         "--legend 6 \"Q\" "
+        "--legend 7 \"Phase error signal\" "
     ;
     debugPlots.QAMdecoderStdin = popen(QAMdemodulatePlot, "w");
     if(debugPlots.QAMdecoderStdin == NULL)
@@ -984,7 +995,7 @@ int main(void)
             fprintf(debugPlots.waveformPlotStdin, "%i %f\n", sample.sampleIndex, sample.sample);
 
         QAM_properties_t QAMstate;
-        QAMstate.carrierFrequency = (double)sample.sampleRate / 8;
+        QAMstate.carrierFrequency = (double)sample.sampleRate / 64;
         QAMstate.carrierPhase = 0;
         QAMstate.k = 1;
         QAMstate.symbolPeriod = (int)(sample.sampleRate / QAMstate.carrierFrequency);
