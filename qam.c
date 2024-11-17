@@ -194,10 +194,10 @@ double raisedCosQAM(int n, int sampleRate)
                 IQIndex = filterLengthSymbols + IQIndex;    // make positive
                 IQdata[IQIndex % filterLengthSymbols] = sample; // the negative time samples are 0
             } else {
-                IQdata[IQIndex % filterLengthSymbols] = alternateI(IQIndex);
+                //IQdata[IQIndex % filterLengthSymbols] = alternateI(IQIndex);
                 //IQdata[IQIndex % filterLengthSymbols] = randomQAM(2);
                 //IQdata[IQIndex % filterLengthSymbols] = sequentialIQ(IQIndex, 4);
-                //IQdata[IQIndex % filterLengthSymbols] = randomQAM_withPreamble(IQIndex, 2);
+                IQdata[IQIndex % filterLengthSymbols] = randomQAM_withPreamble(IQIndex, 2);
             }
         }
 
@@ -218,10 +218,10 @@ double raisedCosQAM(int n, int sampleRate)
     if(sampleIndex == 0)
     {
         int IQindex = (IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols;
-        IQdata[IQindex] = alternateI(symbolIndex + filterLengthSymbols / 2);
+        //IQdata[IQindex] = alternateI(symbolIndex + filterLengthSymbols / 2);
         //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = randomQAM(2);
         //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = sequentialIQ(symbolIndex + filterLengthSymbols / 2, 4);
-        //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = randomQAM_withPreamble(symbolIndex + filterLengthSymbols / 2, 2);
+        IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = randomQAM_withPreamble(symbolIndex + filterLengthSymbols / 2, 2);
         IQindex = IQsampleIndex;
     #if DEBUG_LEVEL > 0
         fprintf(plotStdIn, "%i %i %f %i %f\n", originalN, 6, IQdata[IQsampleIndex].I, 7, IQdata[IQsampleIndex].Q);

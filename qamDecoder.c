@@ -417,7 +417,8 @@ buffered_data_return_t gardnerAlgorithm(const circular_buffer_complex_t *inputSa
 
     // this is shitty code, should be a function
     // PID loop
-    symbolSamplerPhaseRate -= error_I * 0.6 + error * 1.5;  // tight for pure alternating I
+    //symbolSamplerPhaseRate -= error_I * 0.6 + error * 1.5;  // tight for pure alternating I
+    symbolSamplerPhaseRate -= error_I * 0.2 + error * 0.5;  // tight for pure alternating I
     symbolSamplerPhaseRate = fmin(fmax(symbolSamplerPhaseRate, (double)symbolPeriod / 1.5), (double)symbolPeriod * 1.5);
 
     if(debugPlots.gardnerAlgoEnabled)
