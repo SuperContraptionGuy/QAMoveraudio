@@ -95,11 +95,14 @@ iqsample_t sequentialIQ(int symbolIndex, int square)
 
 double raisedCosQAM(int n, int sampleRate)
 {
-<<<<<<< HEAD
-
     int carrierPeriod = 32;
     int k = 1; // cycles per period
-=======
+    //double carrierFrequency = 5000;
+    double carrierFrequency = (double)sampleRate / carrierPeriod;
+    //int carrierFrequency = sampleRate / carrierPeriod;
+
+    //int symbolPeriod = 64; // audio samples per symbol
+    //double symbolPeriod = sampleRate / carrierFrequency * k; // audio samples per symbol
     // array to store time series of filter data
     static double *filter = NULL;
     // array to store timeseries of IQ samples
@@ -122,14 +125,6 @@ double raisedCosQAM(int n, int sampleRate)
         return NAN;
     }
 
-    int carrierPeriod = 64;
->>>>>>> a6dbe1e2fe06bbf54c0f8a1db79c5a1ee08cc411
-    //double carrierFrequency = 5000;
-    double carrierFrequency = (double)sampleRate / carrierPeriod;
-    //int carrierFrequency = sampleRate / carrierPeriod;
-
-    //int symbolPeriod = 64; // audio samples per symbol
-    //double symbolPeriod = sampleRate / carrierFrequency * k; // audio samples per symbol
     // This is a sorta bug. the fact that everything is based on these integers is an issue. I think it causes discretization of carrier
     // frequency and symbol periods, which means the output frequency is not what you put in. for example, 5000 Hz input turns out to be
     // about 5500 Hz actual
