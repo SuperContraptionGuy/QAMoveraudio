@@ -95,12 +95,39 @@ iqsample_t sequentialIQ(int symbolIndex, int square)
 
 double raisedCosQAM(int n, int sampleRate)
 {
+<<<<<<< HEAD
 
     int carrierPeriod = 32;
     int k = 1; // cycles per period
+=======
+    // array to store time series of filter data
+    static double *filter = NULL;
+    // array to store timeseries of IQ samples
+    static iqsample_t *IQdata = NULL;
+
+    if (n < 0)
+    {
+        if (filter != NULL)
+        {
+            free(filter);
+            filter = NULL;
+        }
+
+        if (IQdata != NULL)
+        {
+            free(IQdata);
+            IQdata = NULL;
+        }
+
+        return NAN;
+    }
+
+    int carrierPeriod = 64;
+>>>>>>> a6dbe1e2fe06bbf54c0f8a1db79c5a1ee08cc411
     //double carrierFrequency = 5000;
     double carrierFrequency = (double)sampleRate / carrierPeriod;
     //int carrierFrequency = sampleRate / carrierPeriod;
+
     //int symbolPeriod = 64; // audio samples per symbol
     //double symbolPeriod = sampleRate / carrierFrequency * k; // audio samples per symbol
     // This is a sorta bug. the fact that everything is based on these integers is an issue. I think it causes discretization of carrier
@@ -121,11 +148,6 @@ double raisedCosQAM(int n, int sampleRate)
     //  generate the raised cos filter data once
     //  generate IQ samples ahead of time, just in time
     //  generate audio samples based on those two pieces of info
-
-    // array to store time series of filter data
-    static double *filter;
-    // array to store timeseries of IQ samples
-    static iqsample_t *IQdata;
 
     static int initialized = 0;
     if(!initialized)
@@ -175,7 +197,7 @@ double raisedCosQAM(int n, int sampleRate)
     //int sampleIndex = fmod(n, symbolPeriod); // index of each sample in a symbol, where as n is increasing for the whole signal
     // circular buffer index
     int IQsampleIndex = symbolIndex % filterLengthSymbols;    // IQdata[IQsampleIndex] is current IQ sample, indexes above are future IQdata and below past IQ data both wrapping around until the are filterLengthSymbols / 2 away from current sample index
-    
+
     // generate the next future IQ sample when entering a new symbol period
     //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = alternateI(symbolIndex + filterLengthSymbols / 2);
     if(sampleIndex == 0)
@@ -221,7 +243,7 @@ double raisedCosQAM(int n, int sampleRate)
 
     double audioSample =
     (
-        (filteredIQsample.I) * cos(2.0 * M_PI * sampleIndex * k / symbolPeriod) + 
+        (filteredIQsample.I) * cos(2.0 * M_PI * sampleIndex * k / symbolPeriod) +
         (filteredIQsample.Q) * sin(2.0 * M_PI * sampleIndex * k / symbolPeriod)
     ) / 2.0 * sqrt(2.0);
 
@@ -279,7 +301,7 @@ static double singleChannelODFM_noguard(int n, int sampleRate)
     int symbolStep = n % totalPeriod - guardPeriod;   // should be guardPeriod -> symbolPeriod -> 0 -> symbolPeriod as n increases from 0 -> totalPeriod
     audioSample =
     (
-        (sample.I + randI) * cos(2.0 * M_PI * symbolStep * k / symbolPeriod) + 
+        (sample.I + randI) * cos(2.0 * M_PI * symbolStep * k / symbolPeriod) +
         (sample.Q + randQ) * sin(2.0 * M_PI * symbolStep * k / symbolPeriod)
     ) / 2.0 * sqrt(2.0) * totalAmplitude;
 
