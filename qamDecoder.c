@@ -462,7 +462,7 @@ buffered_data_return_t demodulateQAM(const sample_double_t *sample, QAM_properti
     {
         // initialize phase rate
         symbolSamplerPhaseRate = QAMstate.symbolPeriod; // initialize the phase rate to the idealized value
-        symbolSamplerAccumulatedPhase = symbolSamplerPhaseRate;    // trigger calculations one period from now
+        symbolSamplerAccumulatedPhase = symbolSamplerPhaseRate + 0.25;    // trigger calculations one period from now
         symbolSamplerNextIndex = (int)ceil(symbolSamplerAccumulatedPhase);    // trigger calculations one period from now
         return AWAITING_SAMPLES;
     }
@@ -486,10 +486,10 @@ buffered_data_return_t demodulateQAM(const sample_double_t *sample, QAM_properti
     preMidIndex =       preMidIndex < 0 ? timingSyncBuffer.length + preMidIndex : preMidIndex;              // wrap
 
     //  Interpolation between samples
-    double complex IQmidpoint = -(timingSyncBuffer.buffer[preMidIndex] - timingSyncBuffer.buffer[postMidIndex]) * (symbolSamplerNextIndex - symbolSamplerAccumulatedPhase) + timingSyncBuffer.buffer[postMidIndex];
+    double complex IQmidpoint = (timingSyncBuffer.buffer[preMidIndex] - timingSyncBuffer.buffer[postMidIndex]) * (symbolSamplerNextIndex - symbolSamplerAccumulatedPhase) + timingSyncBuffer.buffer[postMidIndex];
     static double complex IQideal = 0;
     double complex IQlast = IQideal;
-    IQideal = -(timingSyncBuffer.buffer[preIdealIndex] - timingSyncBuffer.buffer[postIdealIndex]) * (symbolSamplerNextIndex - symbolSamplerAccumulatedPhase) + timingSyncBuffer.buffer[postIdealIndex];
+    IQideal = (timingSyncBuffer.buffer[preIdealIndex] - timingSyncBuffer.buffer[postIdealIndex]) * (symbolSamplerNextIndex - symbolSamplerAccumulatedPhase) + timingSyncBuffer.buffer[postIdealIndex];
 
     // calculate error signal
     double symbolSamplerPhaseErrorEstimate = creal((IQideal - IQlast) * conj(IQmidpoint));  // this should get us a rough

@@ -66,6 +66,7 @@ iqsample_t alternateI(int symbolIndex)
 iqsample_t randomQAM(int square)
 {
     // square is the number of states of I and of Q, total states is square squared
+    // I and Q values returned between -1 and 1
     iqsample_t sample = {0, 0};
     sample.I = (double)(rand() % square) / (square - 1) * 2 - 1;
     sample.Q = (double)(rand() % square) / (square - 1) * 2 - 1;
@@ -180,8 +181,8 @@ double raisedCosQAM(int n, int sampleRate)
                 IQIndex = filterLengthSymbols + IQIndex;    // make positive
                 IQdata[IQIndex % filterLengthSymbols] = sample; // the negative time samples are 0
             } else {
-                //IQdata[IQIndex % filterLengthSymbols] = alternateI(IQIndex);
-                IQdata[IQIndex % filterLengthSymbols] = randomQAM(2);
+                IQdata[IQIndex % filterLengthSymbols] = alternateI(IQIndex);
+                //IQdata[IQIndex % filterLengthSymbols] = randomQAM(2);
                 //IQdata[IQIndex % filterLengthSymbols] = sequentialIQ(IQIndex, 4);
                 //IQdata[IQIndex % filterLengthSymbols] = randomQAM_withPreamble(IQIndex, 2);
             }
@@ -203,8 +204,8 @@ double raisedCosQAM(int n, int sampleRate)
     //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = alternateI(symbolIndex + filterLengthSymbols / 2);
     if(sampleIndex == 0)
     {
-        //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = alternateI(symbolIndex + filterLengthSymbols / 2);
-        IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = randomQAM(2);
+        IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = alternateI(symbolIndex + filterLengthSymbols / 2);
+        //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = randomQAM(2);
         //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = sequentialIQ(symbolIndex + filterLengthSymbols / 2, 4);
         //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = randomQAM_withPreamble(symbolIndex + filterLengthSymbols / 2, 2);
     }
@@ -225,8 +226,11 @@ double raisedCosQAM(int n, int sampleRate)
         //filteredIQsample.I = IQdata[IQIndex].I;
         //filteredIQsample.I += IQdata[IQIndex].I / filterLengthSymbols;
     }
-    filteredIQsample.I /= 2;
-    filteredIQsample.Q /= 2;
+    // normalization for raised cos filter, prob not correct
+    //filteredIQsample.I /= 2;
+    //filteredIQsample.Q /= 2;
+    filteredIQsample.I *= M_SQRT1_2;    // normalization factor for QAM constellation with max I and Q of 1, converts to max magnitude of 1
+    filteredIQsample.Q *= M_SQRT1_2;
 
     //return filter[symbolIndex%filterLengthSymbols*symbolPeriod+sampleIndex];
     //return IQdata[(IQsampleIndex + n%filterLengthSymbols - filterLengthSymbols / 2) %filterLengthSymbols].I;
@@ -246,7 +250,7 @@ double raisedCosQAM(int n, int sampleRate)
     (
         (filteredIQsample.I) * cos(2.0 * M_PI * sampleIndex * k / symbolPeriod) +
         (filteredIQsample.Q) * sin(2.0 * M_PI * sampleIndex * k / symbolPeriod)
-    ) / 2.0 * sqrt(2.0);
+    ) / 2.0;    // normalization factor for sum of sin+cos of amp 1 not exceeding 1
     fprintf(plotStdIn, "%i %i %i %i %i %i %f %i %i\n", originalN, 0, symbolIndex, 1, sampleIndex, 2, audioSample, 3, phaseOffset);
 
    return audioSample;
