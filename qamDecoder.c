@@ -469,15 +469,16 @@ buffered_data_return_t demodulateQAM(const sample_double_t *sample, QAM_properti
 
     // Gardner Algorithm
     //  this can happen just once per IQ symbol, so not every audio sample
-    int postIdealIndex =  timingSyncBuffer.insertionIndex - 1;
-    int preIdealIndex = postIdealIndex - 1;
-    int postMidIndex =  postIdealIndex - QAMstate.symbolPeriod / 2;
-    int preMidIndex =   postMidIndex - 1;
+    int postIdealIndexOffset = 0;
+    int preIdealIndexOffset = -1;
+    int postMidIndexOffset = postIdealIndexOffset - QAMstate.symbolPeriod / 2;
+    int preMidIndexOffset = postMidIndexOffset - 1;
 
-    int postIdealIndexPlot = postIdealIndex;
-    int preIdealIndexPlot = preIdealIndex;
-    int postMidIndexPlot = postMidIndex;
-    int preMidIndexPlot = preMidIndex;
+    int postIdealIndex = timingSyncBuffer.insertionIndex - 1;
+    int preIdealIndex = postIdealIndex + preIdealIndexOffset;
+    int postMidIndex =  postIdealIndex + postMidIndexOffset;
+    int preMidIndex =   postIdealIndex+ preMidIndexOffset;
+
 
     postIdealIndex =    postIdealIndex < 0 ? timingSyncBuffer.length + postIdealIndex : postIdealIndex;     // wrap to positive
     preIdealIndex =     preIdealIndex < 0 ? timingSyncBuffer.length + preIdealIndex : preIdealIndex;        // wrap
@@ -485,13 +486,9 @@ buffered_data_return_t demodulateQAM(const sample_double_t *sample, QAM_properti
     preMidIndex =       preMidIndex < 0 ? timingSyncBuffer.length + preMidIndex : preMidIndex;              // wrap
 
     //  Interpolation between samples
-    //double complex IQmidpoint = (timingSyncBuffer.buffer[preMidIndex] - timingSyncBuffer.buffer[postMidIndex]) * fmod(symbolSamplerAccumulatedPhase, 1) + timingSyncBuffer.buffer[preMidIndex];
-    //double complex IQmidpoint = -(timingSyncBuffer.buffer[preMidIndex] - timingSyncBuffer.buffer[postMidIndex]) * (1 -fmod(symbolSamplerAccumulatedPhase, 1)) + timingSyncBuffer.buffer[postMidIndex];
     double complex IQmidpoint = -(timingSyncBuffer.buffer[preMidIndex] - timingSyncBuffer.buffer[postMidIndex]) * (symbolSamplerNextIndex - symbolSamplerAccumulatedPhase) + timingSyncBuffer.buffer[postMidIndex];
     static double complex IQideal = 0;
     double complex IQlast = IQideal;
-    //IQideal = (timingSyncBuffer.buffer[preIdealIndex] - timingSyncBuffer.buffer[postIdealIndex]) * fmod(symbolSamplerAccumulatedPhase, 1) + timingSyncBuffer.buffer[preIdealIndex];
-    //IQideal = -(timingSyncBuffer.buffer[preIdealIndex] - timingSyncBuffer.buffer[postIdealIndex]) * (1 - fmod(symbolSamplerAccumulatedPhase, 1)) + timingSyncBuffer.buffer[postIdealIndex];
     IQideal = -(timingSyncBuffer.buffer[preIdealIndex] - timingSyncBuffer.buffer[postIdealIndex]) * (symbolSamplerNextIndex - symbolSamplerAccumulatedPhase) + timingSyncBuffer.buffer[postIdealIndex];
 
     // calculate error signal
@@ -506,37 +503,37 @@ buffered_data_return_t demodulateQAM(const sample_double_t *sample, QAM_properti
 
     if(debugPlots.QAMdecoderEnabled)
     {
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", postIdealIndexPlot - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n - 1, 8, 0);
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", postIdealIndexPlot - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n, 8, creal(timingSyncBuffer.buffer[postIdealIndex]));
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", postIdealIndexPlot - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n + 1, 8, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + postIdealIndexOffset - 1, 8, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", timingSyncBuffer.n + postIdealIndexOffset, 8, creal(timingSyncBuffer.buffer[postIdealIndex]));
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + postIdealIndexOffset + 1, 8, 0);
 
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", postIdealIndexPlot - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n - 1, 9, 0);
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", postIdealIndexPlot - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n, 9, cimag(timingSyncBuffer.buffer[postIdealIndex]));
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", postIdealIndexPlot - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n + 1, 9, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + postIdealIndexOffset - 1, 9, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", timingSyncBuffer.n + postIdealIndexOffset, 9, cimag(timingSyncBuffer.buffer[postIdealIndex]));
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + postIdealIndexOffset + 1, 9, 0);
 
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", preIdealIndexPlot - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n - 1, 10, 0);
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", preIdealIndexPlot - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n, 10, creal(timingSyncBuffer.buffer[preIdealIndex]));
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", preIdealIndexPlot - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n + 1, 10, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + preIdealIndexOffset - 1, 10, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", timingSyncBuffer.n + preIdealIndexOffset, 10, creal(timingSyncBuffer.buffer[preIdealIndex]));
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + preIdealIndexOffset + 1, 10, 0);
 
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", preIdealIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n - 1, 11, 0);
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", preIdealIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n, 11, cimag(timingSyncBuffer.buffer[preIdealIndex]));
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", preIdealIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n + 1, 11, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + preIdealIndexOffset - 1, 11, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", timingSyncBuffer.n + preIdealIndexOffset, 11, cimag(timingSyncBuffer.buffer[preIdealIndex]));
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + preIdealIndexOffset + 1, 11, 0);
 
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", postMidIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n - 1, 12, 0);
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", postMidIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n, 12, creal(timingSyncBuffer.buffer[postMidIndex]));
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", postMidIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n + 1, 12, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + postMidIndexOffset - 1, 12, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", timingSyncBuffer.n + postMidIndexOffset, 12, creal(timingSyncBuffer.buffer[postMidIndex]));
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + postMidIndexOffset + 1, 12, 0);
 
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", postMidIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n - 1, 13, 0);
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", postMidIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n, 13, cimag(timingSyncBuffer.buffer[postMidIndex]));
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", postMidIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n + 1, 13, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + postMidIndexOffset - 1, 13, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", timingSyncBuffer.n + postMidIndexOffset, 13, cimag(timingSyncBuffer.buffer[postMidIndex]));
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + postMidIndexOffset + 1, 13, 0);
 
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", preMidIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n - 1, 14, 0);
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", preMidIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n, 14, creal(timingSyncBuffer.buffer[preMidIndex]));
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", preMidIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n + 1, 14, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + preMidIndexOffset - 1, 14, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", timingSyncBuffer.n + preMidIndexOffset, 14, creal(timingSyncBuffer.buffer[preMidIndex]));
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + preMidIndexOffset + 1, 14, 0);
 
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", preMidIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n - 1, 15, 0);
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", preMidIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n, 15, cimag(timingSyncBuffer.buffer[preMidIndex]));
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", preMidIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n + 1, 15, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + preMidIndexOffset - 1, 15, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", timingSyncBuffer.n + preMidIndexOffset, 15, cimag(timingSyncBuffer.buffer[preMidIndex]));
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + preMidIndexOffset + 1, 15, 0);
 
         //fprintf(debugPlots.QAMdecoderStdin, "%f %i %f\n", symb
         fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", timingSyncBuffer.n, 7, symbolSamplerPhaseErrorEstimate);
