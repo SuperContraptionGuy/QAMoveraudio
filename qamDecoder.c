@@ -17,14 +17,14 @@ typedef union __attribute__((packed))
     uint8_t byte[sizeof(int32_t)];
 } sample_32_converter_t;    // union to help convert from bytes to integer to double
 
-typedef struct 
+typedef struct
 {
     double sample;      // double value representation of sample
     int sampleRate;     // rate of samples per second
     int sampleIndex;    // index since begining of record
 } sample_double_t;
 
-typedef struct 
+typedef struct
 {
     double complex sample;      // double value representation of sample
     int sampleRate;     // rate of samples per second
@@ -232,18 +232,29 @@ typedef enum
     AWAITING_SAMPLES,
 } buffered_data_return_t;
 
-
-buffered_data_return_t raisedCosFilter(circular_buffer_complex_t inputSamples, sample_complex_t *outputSample, double cutoffFrequency, debugPlots_t debugPlots)
+buffered_data_return_t raisedCosFilter(const circular_buffer_complex_t *inputSamples, sample_complex_t *outputSample, double cutoffFrequency, debugPlots_t debugPlots)
 {
+    // array to store time series of filter data
+    static double *filter = NULL;
+
+    if (inputSamples == NULL)
+    {
+        if (filter != NULL)
+        {
+            free(filter);
+            filter = NULL;
+        }
+    }
+
     //int symbolPeriod = 64; // audio samples per symbol
     int k = 1; // cycles per period
     //int filterSides = 10;    // number of symbols to either side of current symbol to filter with raised cos
     //int filterLengthSymbols = 2 * filterSides + 1;    // length of raised cos filter in IQ symbols, ie, how many IQ samples we need to generate the current symbol
     //int filterLength = filterLengthSymbols * symbolPeriod;  // length in audio samples
+
     //double filterCutoffFrequency = cutoffFrequency * 1.25; // cutoff frequency of the low pass filter
-    double filterCutoffFrequency = cutoffFrequency * 1.25; // cutoff frequency of the low pass filter
-    // array to store time series of filter data
-    static double *filter;
+    double filterCutoffFrequency = 500. * 1.25; // cutoff frequency of the low pass filter
+
     // array to store timeseries of IQ samples
     //static double complex *IQdata;
 
@@ -253,16 +264,25 @@ buffered_data_return_t raisedCosFilter(circular_buffer_complex_t inputSamples, s
     {
         // initialize raised cos filter data
         //filter = malloc(sizeof(double) * filterLength); // this never gets released. so, might wanna fix that TODO
-        filter = malloc(sizeof(double) * inputSamples.length);  // filter kernel = size of input buffer
-        for(int i = 0; i < inputSamples.length; i++)
+        filter = malloc(sizeof(double) * inputSamples->length);  // filter kernel = size of input buffer
+
+        for(int i = 0; i < inputSamples->length; i++)
         {
-            int filterIndex = i - inputSamples.length / 2;    // should go -filterLength/2 -> 0 -> filterLength/2
+            int filterIndex = i - inputSamples->length / 2;    // should go -filterLength/2 -> 0 -> filterLength/2
             // raised cos filter math
             double b = 0.42;    // filter parameter beta, has to do with frequency falloff and time domain fall off
-            double filterValue = sin(2*M_PI * filterCutoffFrequency * filterIndex / inputSamples.sampleRate) / (2*M_PI * filterCutoffFrequency * filterIndex / inputSamples.sampleRate) * 
-                (cos(2*M_PI * filterCutoffFrequency * filterIndex / inputSamples.sampleRate * b)) / (1 - pow(4 * b * filterCutoffFrequency * filterIndex / inputSamples.sampleRate, 2));
+
+            double filterValue =
+            (
+                sin(2*M_PI * filterCutoffFrequency * filterIndex / inputSamples->sampleRate) /
+                (2*M_PI * filterCutoffFrequency * filterIndex / inputSamples->sampleRate) *
+                (cos(2*M_PI * filterCutoffFrequency * filterIndex / inputSamples->sampleRate * b)) /
+                (1 - pow(4 * b * filterCutoffFrequency * filterIndex / inputSamples->sampleRate, 2))
+            );
+
             if(!isfinite(filterValue))   // in case it's undefined, ie divide by zero case
                 filterValue = sin(M_PI / 2 / b) / (M_PI / 2 / b);
+
             if(filterIndex == 0)
                 filterValue = 1;    // the math gives a divide by zero at index 0
 
@@ -276,7 +296,7 @@ buffered_data_return_t raisedCosFilter(circular_buffer_complex_t inputSamples, s
     if(!bufferPrimed)
     {
         // basically, we need to wait for future samples before we can filter the first sample. skip the remainder of this function until enough samples are collected.
-        if(inputSamples.insertionIndex < inputSamples.length / 2)    // filled the buffer half way, now ready to start processing
+        if(inputSamples->insertionIndex < inputSamples->length / 2)    // filled the buffer half way, now ready to start processing
             return AWAITING_SAMPLES;    // wait for samples
 
         bufferPrimed = 1;   // otherwise stop waiting and process
@@ -285,29 +305,43 @@ buffered_data_return_t raisedCosFilter(circular_buffer_complex_t inputSamples, s
     //int relativeSampleIndex = inputSamples.insertionIndex - inputSamples.length / 2;    // 0 is the 'current' time in the circular input buffer. negatives are into the past, positives are into the future
     //  insertionIndex should the the index of the last inserted sample, inserted by the calling function
     outputSample->sample = 0;
-    outputSample->sampleRate = inputSamples.sampleRate;
-    outputSample->sampleIndex = inputSamples.n - inputSamples.length / 2;   // the index is shifted by half the filter width
-    for(int i = 0; i < inputSamples.length; i++)
+    outputSample->sampleRate = inputSamples->sampleRate;
+    outputSample->sampleIndex = inputSamples->n - inputSamples->length / 2;   // the index is shifted by half the filter width
+    for(int i = 0; i < inputSamples->length; i++)
     {
         // calculate the convoution for the sample at relative index 0
 
         // generate relative indexes
-        int relativeSampleIndex = i - inputSamples.length / 2;     // 0 is the 'current' time in the circular input buffer. negatives are into the past, positives are into the future
+        int relativeSampleIndex = i - inputSamples->length / 2;     // 0 is the 'current' time in the circular input buffer. negatives are into the past, positives are into the future
         int relativeFilterIndex = -relativeSampleIndex;     // 0 is the center of the filter
-        
+
         // generate absolute index positions
-        int sampleIndex = (relativeSampleIndex + inputSamples.insertionIndex - inputSamples.length / 2) % inputSamples.length;
+        int sampleIndex = (relativeSampleIndex + inputSamples->insertionIndex - inputSamples->length / 2) % inputSamples->length;
+
         if(sampleIndex < 0)
-            sampleIndex += inputSamples.length; // wrap negative indexes back around to positive values
-        int filterIndex = (relativeFilterIndex + inputSamples.length / 2) % inputSamples.length;
+            sampleIndex += inputSamples->length; // wrap negative indexes back around to positive values
+
+        int filterIndex = (relativeFilterIndex + inputSamples->length / 2) % inputSamples->length;
+
         if(filterIndex < 0)
-            filterIndex += inputSamples.length; // wrap negative indexes back around to positive values
+            filterIndex += inputSamples->length; // wrap negative indexes back around to positive values
 
         // calculate the multiplication and sumation
-        outputSample->sample += inputSamples.buffer[sampleIndex] * filter[filterIndex];
+        outputSample->sample += inputSamples->buffer[sampleIndex] * filter[filterIndex];
         if(debugPlots.filterDebugEnabled && relativeSampleIndex == 0)
-            fprintf(debugPlots.filterDebugStdin, "%i %i %f %i %f %i %f\n", outputSample->sampleIndex, 1, creal(inputSamples.buffer[sampleIndex]), 2, cimag(inputSamples.buffer[sampleIndex]), 3, filter[outputSample->sampleIndex%inputSamples.length]);
-
+        {
+            fprintf(
+                debugPlots.filterDebugStdin,
+                "%i %i %f %i %f %i %f\n",
+                outputSample->sampleIndex,
+                1,
+                creal(inputSamples->buffer[sampleIndex]),
+                2,
+                cimag(inputSamples->buffer[sampleIndex]),
+                3,
+                filter[outputSample->sampleIndex%inputSamples->length]
+            );
+        }
     }
     //printf("output: n=%i, %f+%fi\n", inputSamples.n, creal(outputSample->sample), cimag(outputSample->sample));
     //outputSample->sample /= 24.;        // bit arbitrary, gotta figure out normalization factor for raised cos filter
@@ -320,16 +354,33 @@ buffered_data_return_t raisedCosFilter(circular_buffer_complex_t inputSamples, s
     return RETURNED_SAMPLE;
 }
 
-buffered_data_return_t demodulateQAM(sample_double_t sample, QAM_properties_t QAMstate, debugPlots_t debugPlots)
+buffered_data_return_t demodulateQAM(const sample_double_t *sample, QAM_properties_t QAMstate, debugPlots_t debugPlots)
 {
     // currently does not handle samples after about half the filter size, instead just using them as future samples, but never getting to them. Should add a command to take care of the remainder I guess and cycle the filter function with zeros until it's done TODO
     static int initialized = 0;
-    static circular_buffer_complex_t filterInputBuffer;
-    static circular_buffer_complex_t timingSyncBuffer;
+
+    static circular_buffer_complex_t filterInputBuffer = {0};
+    static circular_buffer_complex_t timingSyncBuffer = {0};
+
+    if (sample == NULL)
+    {
+        if (filterInputBuffer.buffer != NULL)
+        {
+            free(filterInputBuffer.buffer);
+            filterInputBuffer.buffer = NULL;
+        }
+
+        if (timingSyncBuffer.buffer != NULL)
+        {
+            free(timingSyncBuffer.buffer);
+            timingSyncBuffer.buffer = NULL;
+        }
+    }
+
     if(!initialized)
     {
         // initialization
-        filterInputBuffer.length = sample.sampleRate / QAMstate.carrierFrequency * 4 * (10 * 2 + 1);
+        filterInputBuffer.length = sample->sampleRate / QAMstate.carrierFrequency * 4 * (10 * 2 + 1);
         filterInputBuffer.insertionIndex = 0;
         //filterInputBuffer.buffer = malloc(sizeof(double complex) * filterInputBuffer.length);   // allocate some space for the buffer
         filterInputBuffer.buffer = calloc(filterInputBuffer.length, sizeof(double complex));   // allocate some space for the buffer, and zero it
@@ -348,33 +399,33 @@ buffered_data_return_t demodulateQAM(sample_double_t sample, QAM_properties_t QA
     }
 
     if(debugPlots.QAMdecoderEnabled)
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", sample.sampleIndex, 0, sample.sample);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", sample->sampleIndex, 0, sample->sample);
 
     // IQ sampling
     //  multiply by sin and cos
     //      this step may have issues as the carrier frequency comes up to a quarter of the sample rate, since
-    //      the multiplication step generates frequencies in the IQsample centered a  twice the original carrier 
+    //      the multiplication step generates frequencies in the IQsample centered a  twice the original carrier
     //      frequency. The bandwidth of the signal on that elevated carrier may alias. I should double sample rate before this step,
     //      then reduce the sample rate to fraction of the original after filtering out that high frequency stuff.
-    double complex wave = cexp(I*(2*M_PI * QAMstate.carrierFrequency * sample.sampleIndex / sample.sampleRate + QAMstate.carrierPhase));
-    double complex IQsample = sample.sample * wave;
+    double complex wave = cexp(I*(2*M_PI * QAMstate.carrierFrequency * sample->sampleIndex / sample->sampleRate + QAMstate.carrierPhase));
+    double complex IQsample = sample->sample * wave;
 
     if(debugPlots.filterDebugEnabled)
     {
-        fprintf(debugPlots.filterDebugStdin, "%i %i %f\n", sample.sampleIndex, 0, sample.sample);
-        fprintf(debugPlots.filterDebugStdin, "%i %i %f %i %f\n", sample.sampleIndex, 4, creal(wave), 5, cimag(wave));
+        fprintf(debugPlots.filterDebugStdin, "%i %i %f\n", sample->sampleIndex, 0, sample->sample);
+        fprintf(debugPlots.filterDebugStdin, "%i %i %f %i %f\n", sample->sampleIndex, 4, creal(wave), 5, cimag(wave));
     }
 
     //  low pass filter
     //      convolution with a raised cos filter would probably do fine
-    filterInputBuffer.n = sample.sampleIndex;
-    filterInputBuffer.sampleRate = sample.sampleRate;
+    filterInputBuffer.n = sample->sampleIndex;
+    filterInputBuffer.sampleRate = sample->sampleRate;
     filterInputBuffer.phase = 0;
     filterInputBuffer.buffer[filterInputBuffer.insertionIndex] = IQsample;
     sample_complex_t filteredIQsample;
 
     // filter the IQ samples
-    buffered_data_return_t returnValue = raisedCosFilter(filterInputBuffer, &filteredIQsample, QAMstate.carrierFrequency, debugPlots);
+    buffered_data_return_t returnValue = raisedCosFilter(&filterInputBuffer, &filteredIQsample, QAMstate.carrierFrequency, debugPlots);
 
     filterInputBuffer.insertionIndex = (filterInputBuffer.insertionIndex + 1) % filterInputBuffer.length;
 
@@ -453,7 +504,7 @@ buffered_data_return_t demodulateQAM(sample_double_t sample, QAM_properties_t QA
 
     // Costas loop for Phase locking
     //  happens every IQ symbol
-    
+
     //outputSample = ;  // output the determined IQ data
     return RETURNED_SAMPLE;
  }
@@ -751,7 +802,7 @@ int main(void)
         "--legend 0 \"Signal\" "
         "--legend 1 \"equalization factor\" "
     ;
-    //const char *plot = 
+    //const char *plot =
         //"hexdump -C "
         //"tee testoutput.txt"
     //;
@@ -922,7 +973,7 @@ int main(void)
         goto exit;
     }
 
-    char *filterDebugPlot = 
+    char *filterDebugPlot =
         "feedgnuplot "
         "--domain --dataid --lines --points "
         "--title \"Filter debugging plot\" "
@@ -945,7 +996,7 @@ int main(void)
         goto exit;
     }
 
-    char *QAMdemodulatePlot = 
+    char *QAMdemodulatePlot =
         "feedgnuplot "
         "--domain --dataid --lines --points "
         "--title \"QAM demodulation debug plot\" "
@@ -968,7 +1019,7 @@ int main(void)
     }
 
     debugPlots.flags = 0;   // reset all the flags
-    
+
     // set some debug flags
     debugPlots.waveformEnabled = 1;
     debugPlots.QAMdecoderEnabled = 1;
@@ -999,7 +1050,7 @@ int main(void)
         QAMstate.carrierPhase = 0;
         QAMstate.k = 1;
         QAMstate.symbolPeriod = (int)(sample.sampleRate / QAMstate.carrierFrequency);
-        demodulateQAM(sample, QAMstate, debugPlots);
+        demodulateQAM(&sample, QAMstate, debugPlots);
 
 
         //OFDM_properties_t OFDMdemodulateState = {SYMBOL_PERIOD, &sampleBuffer, k};
