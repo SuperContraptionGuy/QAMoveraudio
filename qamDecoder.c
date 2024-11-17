@@ -171,6 +171,7 @@ typedef struct
     FILE* eyeDiagramImaginaryStdin;
     FILE* filterDebugStdin;
     FILE* QAMdecoderStdin;
+    FILE* gardnerAlgoStdin;
     union
     {
         struct
@@ -184,6 +185,7 @@ typedef struct
             unsigned int eyeDiagramImaginaryEnabled : 1;
             unsigned int filterDebugEnabled         : 1;
             unsigned int QAMdecoderEnabled          : 1;
+            unsigned int gardnerAlgoEnabled         : 1;
         };
             unsigned long int flags;
     };
@@ -354,6 +356,140 @@ buffered_data_return_t raisedCosFilter(const circular_buffer_complex_t *inputSam
     return RETURNED_SAMPLE;
 }
 
+buffered_data_return_t gardnerAlgorithm(const circular_buffer_complex_t *inputSamples, sample_complex_t *outputSamples, double symbolPeriod, debugPlots_t debugPlots)
+{
+    // Choosing samples for timing lock and symbol detection
+    static double symbolSamplerAccumulatedPhase = 0;
+    static double symbolSamplerPhaseRate = 0;
+    static int symbolSamplerNextIndex = 0;  // next index to trigger calculations, should be just after the ideal sample time.
+    static int idealIQindex = 0;
+
+    if(debugPlots.gardnerAlgoEnabled)
+    {
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %f\n", inputSamples->n, 5, creal(inputSamples->buffer[inputSamples->insertionIndex]));
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %f\n", inputSamples->n, 6, cimag(inputSamples->buffer[inputSamples->insertionIndex]));
+    }
+
+    if(inputSamples->n < symbolSamplerNextIndex) // check if it's too early
+        return AWAITING_SAMPLES;    // it's too early, wait till the right number of IQ samples has passed.
+
+
+    if(symbolSamplerAccumulatedPhase == 0)
+    {
+        // initialize phase rate
+        symbolSamplerPhaseRate = symbolPeriod; // initialize the phase rate to the idealized value
+        symbolSamplerAccumulatedPhase = symbolSamplerPhaseRate + 0.25;    // trigger calculations one period from now
+        symbolSamplerNextIndex = (int)ceil(symbolSamplerAccumulatedPhase);    // trigger calculations one period from now
+        return AWAITING_SAMPLES;
+    }
+
+    // Gardner Algorithm
+    //  this can happen just once per IQ symbol, so not every audio sample
+    int postIdealIndexOffset = 0;
+    int preIdealIndexOffset = -1;
+    int postMidIndexOffset = postIdealIndexOffset - symbolPeriod / 2;
+    int preMidIndexOffset = postMidIndexOffset - 1;
+
+    int postIdealIndex = inputSamples->insertionIndex;
+    int preIdealIndex = postIdealIndex + preIdealIndexOffset;
+    int postMidIndex =  postIdealIndex + postMidIndexOffset;
+    int preMidIndex =   postIdealIndex+ preMidIndexOffset;
+
+
+    postIdealIndex =    postIdealIndex < 0 ? inputSamples->length + postIdealIndex : postIdealIndex;     // wrap to positive
+    preIdealIndex =     preIdealIndex < 0 ? inputSamples->length + preIdealIndex : preIdealIndex;        // wrap
+    postMidIndex =      postMidIndex < 0 ? inputSamples->length + postMidIndex : postMidIndex;           // wrap
+    preMidIndex =       preMidIndex < 0 ? inputSamples->length + preMidIndex : preMidIndex;              // wrap
+
+    //  Interpolation between samples
+    double complex IQmidpoint = (inputSamples->buffer[preMidIndex] - inputSamples->buffer[postMidIndex]) * (symbolSamplerNextIndex - symbolSamplerAccumulatedPhase) + inputSamples->buffer[postMidIndex];
+    static double complex IQideal = 0;
+    double complex IQlast = IQideal;
+    IQideal = (inputSamples->buffer[preIdealIndex] - inputSamples->buffer[postIdealIndex]) * (symbolSamplerNextIndex - symbolSamplerAccumulatedPhase) + inputSamples->buffer[postIdealIndex];
+
+    // calculate error signal
+    //      I either need to changed the phaseErrorEstimate to rateOfPhaseErrorEstimate, or else allow the PID loop to set the phase offset directly rather than adjusting it's derivitive
+    static double symbolSamplerPhaseErrorEstimate = 0;
+    double errorLast = symbolSamplerPhaseErrorEstimate;
+    symbolSamplerPhaseErrorEstimate = creal((IQideal - IQlast) * conj(IQmidpoint));  // this should get us a rough sync
+    double error_I = symbolSamplerPhaseErrorEstimate;  // integral is just the value before derivative
+    double error = symbolSamplerPhaseErrorEstimate - errorLast; // error is derivative of phase offset estimate
+
+    // this is shitty code, should be a function
+    // PID loop
+    symbolSamplerPhaseRate -= error_I * 0.6 + error * 1.5;  // tight for pure alternating I
+    symbolSamplerPhaseRate = fmin(fmax(symbolSamplerPhaseRate, (double)symbolPeriod / 1.5), (double)symbolPeriod * 1.5);
+
+    if(debugPlots.gardnerAlgoEnabled)
+    {
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %i\n", inputSamples->n + postIdealIndexOffset - 1, 8, 0);
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %f\n", inputSamples->n + postIdealIndexOffset, 8, creal(inputSamples->buffer[postIdealIndex]));
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %i\n", inputSamples->n + postIdealIndexOffset + 1, 8, 0);
+
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %i\n", inputSamples->n + postIdealIndexOffset - 1, 9, 0);
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %f\n", inputSamples->n + postIdealIndexOffset, 9, cimag(inputSamples->buffer[postIdealIndex]));
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %i\n", inputSamples->n + postIdealIndexOffset + 1, 9, 0);
+
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %i\n", inputSamples->n + preIdealIndexOffset - 1, 10, 0);
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %f\n", inputSamples->n + preIdealIndexOffset, 10, creal(inputSamples->buffer[preIdealIndex]));
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %i\n", inputSamples->n + preIdealIndexOffset + 1, 10, 0);
+
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %i\n", inputSamples->n + preIdealIndexOffset - 1, 11, 0);
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %f\n", inputSamples->n + preIdealIndexOffset, 11, cimag(inputSamples->buffer[preIdealIndex]));
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %i\n", inputSamples->n + preIdealIndexOffset + 1, 11, 0);
+
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %i\n", inputSamples->n + postMidIndexOffset - 1, 12, 0);
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %f\n", inputSamples->n + postMidIndexOffset, 12, creal(inputSamples->buffer[postMidIndex]));
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %i\n", inputSamples->n + postMidIndexOffset + 1, 12, 0);
+
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %i\n", inputSamples->n + postMidIndexOffset - 1, 13, 0);
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %f\n", inputSamples->n + postMidIndexOffset, 13, cimag(inputSamples->buffer[postMidIndex]));
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %i\n", inputSamples->n + postMidIndexOffset + 1, 13, 0);
+
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %i\n", inputSamples->n + preMidIndexOffset - 1, 14, 0);
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %f\n", inputSamples->n + preMidIndexOffset, 14, creal(inputSamples->buffer[preMidIndex]));
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %i\n", inputSamples->n + preMidIndexOffset + 1, 14, 0);
+
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %i\n", inputSamples->n + preMidIndexOffset - 1, 15, 0);
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %f\n", inputSamples->n + preMidIndexOffset, 15, cimag(inputSamples->buffer[preMidIndex]));
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %i\n", inputSamples->n + preMidIndexOffset + 1, 15, 0);
+
+        //fprintf(debugPlots.gardnerAlgoStdin, "%f %i %f\n", symb
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %f\n", inputSamples->n, 7, symbolSamplerPhaseErrorEstimate);
+
+        fprintf(debugPlots.gardnerAlgoStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase - 0.5, 16, 0);
+        fprintf(debugPlots.gardnerAlgoStdin, "%f %i %f\n", symbolSamplerAccumulatedPhase, 16, creal(IQideal));
+        fprintf(debugPlots.gardnerAlgoStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase + 0.5, 16, 0);
+
+        fprintf(debugPlots.gardnerAlgoStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase - 0.5, 17, 0);
+        fprintf(debugPlots.gardnerAlgoStdin, "%f %i %f\n", symbolSamplerAccumulatedPhase, 17, cimag(IQideal));
+        fprintf(debugPlots.gardnerAlgoStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase + 0.5, 17, 0);
+
+        fprintf(debugPlots.gardnerAlgoStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase - symbolPeriod / 2 - 0.5, 18, 0);
+        fprintf(debugPlots.gardnerAlgoStdin, "%f %i %f\n", symbolSamplerAccumulatedPhase - symbolPeriod / 2, 18, creal(IQmidpoint));
+        fprintf(debugPlots.gardnerAlgoStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase - symbolPeriod / 2 + 0.5, 18, 0);
+
+        fprintf(debugPlots.gardnerAlgoStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase - symbolPeriod / 2 - 0.5, 19, 0);
+        fprintf(debugPlots.gardnerAlgoStdin, "%f %i %f\n", symbolSamplerAccumulatedPhase - symbolPeriod / 2, 19, cimag(IQmidpoint));
+        fprintf(debugPlots.gardnerAlgoStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase - symbolPeriod / 2 + 0.5, 19, 0);
+
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %i\n", symbolSamplerNextIndex, 20, 0);
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %i\n", symbolSamplerNextIndex, 20, 2);
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %i\n", symbolSamplerNextIndex, 20, -2);
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %i\n", symbolSamplerNextIndex, 20, 0);
+    }
+
+    // update the phase rate for symbol sampler
+    symbolSamplerAccumulatedPhase += symbolSamplerPhaseRate;    // apply the phase offset
+    symbolSamplerNextIndex = (int)ceil(symbolSamplerAccumulatedPhase); // determine the next index to make calculations
+
+    outputSamples->sample = IQideal;
+    outputSamples->sampleIndex = idealIQindex;
+    //outputSamples->sampleRate =   // not sure actually
+    idealIQindex++; // increment symbol number
+    return RETURNED_SAMPLE;
+}
+
 buffered_data_return_t demodulateQAM(const sample_double_t *sample, QAM_properties_t QAMstate, debugPlots_t debugPlots)
 {
     // currently does not handle samples after about half the filter size, instead just using them as future samples, but never getting to them. Should add a command to take care of the remainder I guess and cycle the filter function with zeros until it's done TODO
@@ -396,6 +532,7 @@ buffered_data_return_t demodulateQAM(const sample_double_t *sample, QAM_properti
             fprintf(stderr, "TimingSyncBuffer failed to allocate: %s\n", strerror(errno));
         // only run once
         initialized = 1;
+
     }
 
     if(debugPlots.QAMdecoderEnabled)
@@ -415,6 +552,9 @@ buffered_data_return_t demodulateQAM(const sample_double_t *sample, QAM_properti
         fprintf(debugPlots.filterDebugStdin, "%i %i %f\n", sample->sampleIndex, 0, sample->sample);
         fprintf(debugPlots.filterDebugStdin, "%i %i %f %i %f\n", sample->sampleIndex, 4, creal(wave), 5, cimag(wave));
     }
+
+    if(debugPlots.gardnerAlgoEnabled)
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %f\n", sample->sampleIndex, 0, sample->sample);
 
     //  low pass filter
     //      convolution with a raised cos filter would probably do fine
@@ -446,123 +586,16 @@ buffered_data_return_t demodulateQAM(const sample_double_t *sample, QAM_properti
     // collect samples into a buffer
     timingSyncBuffer.buffer[timingSyncBuffer.insertionIndex] = filteredIQsample.sample;
     timingSyncBuffer.n = filteredIQsample.sampleIndex;
+    sample_complex_t roughSyncedIQsample;
+
+    returnValue = gardnerAlgorithm(&timingSyncBuffer, &roughSyncedIQsample, QAMstate.symbolPeriod, debugPlots);
+
     timingSyncBuffer.insertionIndex = (timingSyncBuffer.insertionIndex + 1) % timingSyncBuffer.length;
 
 
-    // Choosing samples for timing lock and symbol detection
-    static double symbolSamplerAccumulatedPhase = 0;
-    static double symbolSamplerPhaseRate = 0;
-    static int symbolSamplerNextIndex = 0;  // next index to trigger calculations, should be just after the ideal sample time.
-
-    if(timingSyncBuffer.n < symbolSamplerNextIndex) // check if it's too early
-        return AWAITING_SAMPLES;    // it's too early, wait till the right number of IQ samples has passed.
-
-
-    if(symbolSamplerAccumulatedPhase == 0)
-    {
-        // initialize phase rate
-        symbolSamplerPhaseRate = QAMstate.symbolPeriod; // initialize the phase rate to the idealized value
-        symbolSamplerAccumulatedPhase = symbolSamplerPhaseRate + 0.25;    // trigger calculations one period from now
-        symbolSamplerNextIndex = (int)ceil(symbolSamplerAccumulatedPhase);    // trigger calculations one period from now
+    if(returnValue != RETURNED_SAMPLE)
         return AWAITING_SAMPLES;
-    }
 
-    // Gardner Algorithm
-    //  this can happen just once per IQ symbol, so not every audio sample
-    int postIdealIndexOffset = 0;
-    int preIdealIndexOffset = -1;
-    int postMidIndexOffset = postIdealIndexOffset - QAMstate.symbolPeriod / 2;
-    int preMidIndexOffset = postMidIndexOffset - 1;
-
-    int postIdealIndex = timingSyncBuffer.insertionIndex - 1;
-    int preIdealIndex = postIdealIndex + preIdealIndexOffset;
-    int postMidIndex =  postIdealIndex + postMidIndexOffset;
-    int preMidIndex =   postIdealIndex+ preMidIndexOffset;
-
-
-    postIdealIndex =    postIdealIndex < 0 ? timingSyncBuffer.length + postIdealIndex : postIdealIndex;     // wrap to positive
-    preIdealIndex =     preIdealIndex < 0 ? timingSyncBuffer.length + preIdealIndex : preIdealIndex;        // wrap
-    postMidIndex =      postMidIndex < 0 ? timingSyncBuffer.length + postMidIndex : postMidIndex;           // wrap
-    preMidIndex =       preMidIndex < 0 ? timingSyncBuffer.length + preMidIndex : preMidIndex;              // wrap
-
-    //  Interpolation between samples
-    double complex IQmidpoint = (timingSyncBuffer.buffer[preMidIndex] - timingSyncBuffer.buffer[postMidIndex]) * (symbolSamplerNextIndex - symbolSamplerAccumulatedPhase) + timingSyncBuffer.buffer[postMidIndex];
-    static double complex IQideal = 0;
-    double complex IQlast = IQideal;
-    IQideal = (timingSyncBuffer.buffer[preIdealIndex] - timingSyncBuffer.buffer[postIdealIndex]) * (symbolSamplerNextIndex - symbolSamplerAccumulatedPhase) + timingSyncBuffer.buffer[postIdealIndex];
-
-    // calculate error signal
-    double symbolSamplerPhaseErrorEstimate = creal((IQideal - IQlast) * conj(IQmidpoint));  // this should get us a rough
-
-    // this is shitty code, should be a function
-    // PID loop
-    static double integral = 0;
-    integral += symbolSamplerAccumulatedPhase;
-    //symbolSamplerPhaseRate += integral * 0.00 + symbolSamplerPhaseErrorEstimate * 0.2;
-    //symbolSamplerPhaseRate = fmin(fmax(symbolSamplerPhaseRate, (double)QAMstate.symbolPeriod / 1.5), (double)QAMstate.symbolPeriod * 1.5);
-
-    if(debugPlots.QAMdecoderEnabled)
-    {
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + postIdealIndexOffset - 1, 8, 0);
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", timingSyncBuffer.n + postIdealIndexOffset, 8, creal(timingSyncBuffer.buffer[postIdealIndex]));
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + postIdealIndexOffset + 1, 8, 0);
-
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + postIdealIndexOffset - 1, 9, 0);
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", timingSyncBuffer.n + postIdealIndexOffset, 9, cimag(timingSyncBuffer.buffer[postIdealIndex]));
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + postIdealIndexOffset + 1, 9, 0);
-
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + preIdealIndexOffset - 1, 10, 0);
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", timingSyncBuffer.n + preIdealIndexOffset, 10, creal(timingSyncBuffer.buffer[preIdealIndex]));
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + preIdealIndexOffset + 1, 10, 0);
-
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + preIdealIndexOffset - 1, 11, 0);
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", timingSyncBuffer.n + preIdealIndexOffset, 11, cimag(timingSyncBuffer.buffer[preIdealIndex]));
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + preIdealIndexOffset + 1, 11, 0);
-
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + postMidIndexOffset - 1, 12, 0);
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", timingSyncBuffer.n + postMidIndexOffset, 12, creal(timingSyncBuffer.buffer[postMidIndex]));
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + postMidIndexOffset + 1, 12, 0);
-
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + postMidIndexOffset - 1, 13, 0);
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", timingSyncBuffer.n + postMidIndexOffset, 13, cimag(timingSyncBuffer.buffer[postMidIndex]));
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + postMidIndexOffset + 1, 13, 0);
-
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + preMidIndexOffset - 1, 14, 0);
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", timingSyncBuffer.n + preMidIndexOffset, 14, creal(timingSyncBuffer.buffer[preMidIndex]));
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + preMidIndexOffset + 1, 14, 0);
-
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + preMidIndexOffset - 1, 15, 0);
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", timingSyncBuffer.n + preMidIndexOffset, 15, cimag(timingSyncBuffer.buffer[preMidIndex]));
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", timingSyncBuffer.n + preMidIndexOffset + 1, 15, 0);
-
-        //fprintf(debugPlots.QAMdecoderStdin, "%f %i %f\n", symb
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", timingSyncBuffer.n, 7, symbolSamplerPhaseErrorEstimate);
-
-        fprintf(debugPlots.QAMdecoderStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase - 0.5, 16, 0);
-        fprintf(debugPlots.QAMdecoderStdin, "%f %i %f\n", symbolSamplerAccumulatedPhase, 16, creal(IQideal));
-        fprintf(debugPlots.QAMdecoderStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase + 0.5, 16, 0);
-
-        fprintf(debugPlots.QAMdecoderStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase - 0.5, 17, 0);
-        fprintf(debugPlots.QAMdecoderStdin, "%f %i %f\n", symbolSamplerAccumulatedPhase, 17, cimag(IQideal));
-        fprintf(debugPlots.QAMdecoderStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase + 0.5, 17, 0);
-
-        fprintf(debugPlots.QAMdecoderStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase - QAMstate.symbolPeriod / 2 - 0.5, 18, 0);
-        fprintf(debugPlots.QAMdecoderStdin, "%f %i %f\n", symbolSamplerAccumulatedPhase - QAMstate.symbolPeriod / 2, 18, creal(IQmidpoint));
-        fprintf(debugPlots.QAMdecoderStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase - QAMstate.symbolPeriod / 2 + 0.5, 18, 0);
-
-        fprintf(debugPlots.QAMdecoderStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase - QAMstate.symbolPeriod / 2 - 0.5, 19, 0);
-        fprintf(debugPlots.QAMdecoderStdin, "%f %i %f\n", symbolSamplerAccumulatedPhase - QAMstate.symbolPeriod / 2, 19, cimag(IQmidpoint));
-        fprintf(debugPlots.QAMdecoderStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase - QAMstate.symbolPeriod / 2 + 0.5, 19, 0);
-
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", symbolSamplerNextIndex, 20, 0);
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", symbolSamplerNextIndex, 20, 10);
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", symbolSamplerNextIndex, 20, -10);
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", symbolSamplerNextIndex, 20, 0);
-    }
-
-    // update the phase rate for symbol sampler
-    symbolSamplerAccumulatedPhase += symbolSamplerPhaseRate;    // apply the phase offset
-    symbolSamplerNextIndex = (int)ceil(symbolSamplerAccumulatedPhase); // determine the next index to make calculations
 
     // Costas loop for Phase locking
     //  happens every IQ symbol
@@ -1064,10 +1097,24 @@ int main(void)
         "--title \"QAM demodulation debug plot\" "
         "--xlabel \"Time (sample index)\" --ylabel \"value\" "
         "--legend 0 \"Original audio samples\" "
-        "--legend 1 \"IQ sampler internal exponential real part\" "
-        "--legend 2 \"IQ sampler internal exponential imaginary part\" "
-        "--legend 3 \"I prefilter\" "
-        "--legend 4 \"Q prefilter\" "
+        "--legend 5 \"I\" "
+        "--legend 6 \"Q\" "
+        "--legend 7 \"Phase error signal\" "
+    ;
+    debugPlots.QAMdecoderStdin = popen(QAMdemodulatePlot, "w");
+    if(debugPlots.QAMdecoderStdin == NULL)
+    {
+        fprintf(stderr, "Failed to create QAM decoder debug plot: %s\n", strerror(errno));
+        retval = 9;
+        goto exit;
+    }
+
+    char *gardenerAlgoPlot =
+        "feedgnuplot "
+        "--domain --dataid --lines --points "
+        "--title \"Gardener algorithm debug plot\" "
+        "--xlabel \"Time (sample index)\" --ylabel \"value\" "
+        "--legend 0 \"Original audio samples\" "
         "--legend 5 \"I\" "
         "--legend 6 \"Q\" "
         "--legend 7 \"Phase error signal\" "
@@ -1085,20 +1132,21 @@ int main(void)
         "--legend 19 \"Interpolated mid Q\" "
         "--legend 20 \"sample time Ceil\" "
     ;
-    debugPlots.QAMdecoderStdin = popen(QAMdemodulatePlot, "w");
-    if(debugPlots.QAMdecoderStdin == NULL)
+    debugPlots.gardnerAlgoStdin = popen(gardenerAlgoPlot, "w");
+    if(debugPlots.gardnerAlgoStdin == NULL)
     {
-        fprintf(stderr, "Failed to create QAM decoder debug plot: %s\n", strerror(errno));
-        retval = 9;
+        fprintf(stderr, "Failed to create gardner algo debug plot: %s\n", strerror(errno));
+        retval = 10;
         goto exit;
     }
 
     debugPlots.flags = 0;   // reset all the flags
 
     // set some debug flags
-    debugPlots.waveformEnabled = 1;
-    debugPlots.QAMdecoderEnabled = 1;
-    debugPlots.filterDebugEnabled = 1;
+    //debugPlots.waveformEnabled = 1;
+    //debugPlots.QAMdecoderEnabled = 1;
+    //debugPlots.filterDebugEnabled = 1;
+    debugPlots.gardnerAlgoEnabled = 1;
 
 
     // while there is data to recieve, not end of file -> right now just a fixed number of 2000
@@ -1184,6 +1232,11 @@ exit:
     if((debugPlots.filterDebugStdin != NULL) && (fork() == 0))
     {
         pclose(debugPlots.filterDebugStdin);
+        return 0;
+    }
+    if((debugPlots.gardnerAlgoStdin != NULL) && (fork() == 0))
+    {
+        pclose(debugPlots.gardnerAlgoStdin);
         return 0;
     }
 

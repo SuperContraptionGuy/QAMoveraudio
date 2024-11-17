@@ -12,7 +12,7 @@
 
 #define WARN_UNUSED __attribute__((warn_unused_result))
 
-#define DEBUG_LEVEL 1
+#define DEBUG_LEVEL 0
 #if DEBUG_LEVEL >= 1
     FILE* hexdumpStdIn = NULL;
     FILE* plotStdIn = NULL;
@@ -140,9 +140,22 @@ double raisedCosQAM(int n, int sampleRate)
 
 
     // phase offset that cycles through sequentially all phase offsets
-    int phaseOffset = n *  2 / 1200 % symbolPeriod;
-    //int phaseOffset = 
-    int originalN = n;
+    //int phaseOffset = n *  2 / 1200 % symbolPeriod;
+    int phaseOffset = 0;
+    
+    /*
+    static int phaseOffset = -1;
+    if (phaseOffset == -1)
+        phaseOffset = rand() % symbolPeriod;
+    */
+    /*
+    static int phaseOffset = -1;
+    if (phaseOffset == -1 || (n % (carrierPeriod * 30)) == 0)
+        phaseOffset = rand() % symbolPeriod;
+    */
+
+    int originalN = n;  // for plotting
+    n -= phaseOffset;
     n = n < 0 ? 0 : n - phaseOffset, 0;
 
     // concept:
@@ -204,10 +217,16 @@ double raisedCosQAM(int n, int sampleRate)
     //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = alternateI(symbolIndex + filterLengthSymbols / 2);
     if(sampleIndex == 0)
     {
-        IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = alternateI(symbolIndex + filterLengthSymbols / 2);
+        int IQindex = (IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols;
+        IQdata[IQindex] = alternateI(symbolIndex + filterLengthSymbols / 2);
         //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = randomQAM(2);
         //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = sequentialIQ(symbolIndex + filterLengthSymbols / 2, 4);
         //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = randomQAM_withPreamble(symbolIndex + filterLengthSymbols / 2, 2);
+        IQindex = IQsampleIndex;
+    #if DEBUG_LEVEL > 0
+        fprintf(plotStdIn, "%i %i %f %i %f\n", originalN, 6, IQdata[IQsampleIndex].I, 7, IQdata[IQsampleIndex].Q);
+        fprintf(plotStdIn, "%i %i %i\n", originalN, 8, IQindex);
+    #endif
     }
 
     // add up raised cos contributions from all samples in the IQdata array
@@ -225,6 +244,9 @@ double raisedCosQAM(int n, int sampleRate)
         //filteredIQsample.I += filter[filterIndex];
         //filteredIQsample.I = IQdata[IQIndex].I;
         //filteredIQsample.I += IQdata[IQIndex].I / filterLengthSymbols;
+    #if DEBUG_LEVEL > 0
+        //fprintf(plotStdIn, "%i %i %f\n", originalN + i, 8 + symbolIndex, IQdata[IQIndex].I);
+    #endif
     }
     // normalization for raised cos filter, prob not correct
     //filteredIQsample.I /= 2;
@@ -251,7 +273,10 @@ double raisedCosQAM(int n, int sampleRate)
         (filteredIQsample.I) * cos(2.0 * M_PI * sampleIndex * k / symbolPeriod) +
         (filteredIQsample.Q) * sin(2.0 * M_PI * sampleIndex * k / symbolPeriod)
     ) / 2.0;    // normalization factor for sum of sin+cos of amp 1 not exceeding 1
+#if DEBUG_LEVEL > 0
     fprintf(plotStdIn, "%i %i %i %i %i %i %f %i %i\n", originalN, 0, symbolIndex, 1, sampleIndex, 2, audioSample, 3, phaseOffset);
+    fprintf(plotStdIn, "%i %i %f %i %f\n", originalN, 4, filteredIQsample.I, 5, filteredIQsample.Q);
+#endif
 
    return audioSample;
 
@@ -491,9 +516,18 @@ static int WARN_UNUSED generateSamplesAndOutput(char* filenameInput)
     }
     char *plotstr = 
         "feedgnuplot "
-        "--domain --dataid --lines --points "
+        "--domain --dataid --lines --points --maxcurves 100000 "
         "--title \"Debug modulator\" "
         "--xlabel \"Time (n)\" --ylabel \"value\" "
+        "--legend 0 \"Symbol Index\" "
+        "--legend 1 \"Sample Index\" "
+        "--legend 2 \"Generated Audio Sample\" "
+        "--legend 3 \"Phase Offset\" "
+        "--legend 4 \"Filtered I\" "
+        "--legend 5 \"Filtered Q\" "
+        "--legend 6 \"I\" "
+        "--legend 7 \"Q\" "
+
     ;
     plotStdIn = popen(plotstr, "w");
 #endif
@@ -577,7 +611,9 @@ static int WARN_UNUSED generateSamplesAndOutput(char* filenameInput)
             #if DEBUG_LEVEL >= 1
                 if (outputstd == 0)
                 {
-                    //putc(byte, hexdumpStdIn);
+                #if DEBUG_LEVEL > 1
+                    putc(byte, hexdumpStdIn);
+                #endif
                 }
                 else
                 {
