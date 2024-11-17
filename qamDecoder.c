@@ -441,8 +441,8 @@ buffered_data_return_t demodulateQAM(sample_double_t sample, QAM_properties_t QA
     // PID loop
     static double integral = 0;
     integral += symbolSamplerAccumulatedPhase;
-    symbolSamplerPhaseRate += integral * 0.00 + symbolSamplerPhaseErrorEstimate * 0.2;
-    symbolSamplerPhaseRate = fmin(fmax(symbolSamplerPhaseRate, (double)QAMstate.symbolPeriod / 1.5), (double)QAMstate.symbolPeriod * 1.5);
+    //symbolSamplerPhaseRate += integral * 0.00 + symbolSamplerPhaseErrorEstimate * 0.2;
+    //symbolSamplerPhaseRate = fmin(fmax(symbolSamplerPhaseRate, (double)QAMstate.symbolPeriod / 1.5), (double)QAMstate.symbolPeriod * 1.5);
 
     if(debugPlots.QAMdecoderEnabled)
     {

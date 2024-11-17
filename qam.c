@@ -95,12 +95,13 @@ iqsample_t sequentialIQ(int symbolIndex, int square)
 
 double raisedCosQAM(int n, int sampleRate)
 {
-    int carrierPeriod = 64;
+
+    int carrierPeriod = 32;
+    int k = 1; // cycles per period
     //double carrierFrequency = 5000;
     double carrierFrequency = (double)sampleRate / carrierPeriod;
     //int carrierFrequency = sampleRate / carrierPeriod;
     //int symbolPeriod = 64; // audio samples per symbol
-    int k = 1; // cycles per period
     //double symbolPeriod = sampleRate / carrierFrequency * k; // audio samples per symbol
     // This is a sorta bug. the fact that everything is based on these integers is an issue. I think it causes discretization of carrier
     // frequency and symbol periods, which means the output frequency is not what you put in. for example, 5000 Hz input turns out to be
@@ -109,6 +110,12 @@ double raisedCosQAM(int n, int sampleRate)
     int filterSides = 10;    // number of symbols to either side of current symbol to filter with raised cos
     int filterLengthSymbols = 2 * filterSides + 1;    // length of raised cos filter in IQ symbols, ie, how many IQ samples we need to generate the current symbol
     int filterLength = filterLengthSymbols * symbolPeriod;  // length in audio samples
+
+
+    // phase offset that cycles through sequentially all phase offsets
+    int phaseOffset = n *  2 / 1200 % symbolPeriod;
+    //int phaseOffset = 
+    n+=phaseOffset;
 
     // concept:
     //  generate the raised cos filter data once
@@ -151,10 +158,10 @@ double raisedCosQAM(int n, int sampleRate)
                 IQIndex = filterLengthSymbols + IQIndex;    // make positive
                 IQdata[IQIndex % filterLengthSymbols] = sample; // the negative time samples are 0
             } else {
-                //IQdata[IQIndex % filterLengthSymbols] = alternateI(IQIndex);
+                IQdata[IQIndex % filterLengthSymbols] = alternateI(IQIndex);
                 //IQdata[IQIndex % filterLengthSymbols] = randomQAM(IQIndex, 2);
                 //IQdata[IQIndex % filterLengthSymbols] = sequentialIQ(IQIndex, 4);
-                IQdata[IQIndex % filterLengthSymbols] = randomQAM_withPreamble(IQIndex, 2);
+                //IQdata[IQIndex % filterLengthSymbols] = randomQAM_withPreamble(IQIndex, 2);
             }
         }
 
@@ -173,10 +180,10 @@ double raisedCosQAM(int n, int sampleRate)
     //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = alternateI(symbolIndex + filterLengthSymbols / 2);
     if(sampleIndex == 0)
     {
-        //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = alternateI(symbolIndex + filterLengthSymbols / 2);
+        IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = alternateI(symbolIndex + filterLengthSymbols / 2);
         //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = randomQAM(symbolIndex + filterLengthSymbols / 2, 2);
         //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = sequentialIQ(symbolIndex + filterLengthSymbols / 2, 4);
-        IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = randomQAM_withPreamble(symbolIndex + filterLengthSymbols / 2, 2);
+        //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = randomQAM_withPreamble(symbolIndex + filterLengthSymbols / 2, 2);
     }
 
     // add up raised cos contributions from all samples in the IQdata array
@@ -282,6 +289,7 @@ static double singleChannelODFM_noguard(int n, int sampleRate)
 // this is the point where samples are generated
 static double WARN_UNUSED calculateSample(int n, int sampleRate)
 {
+
     //double amplitudeScaler = 0.1;
     double amplitudeScaler = 1;
     /*
