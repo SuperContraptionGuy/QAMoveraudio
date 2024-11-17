@@ -457,33 +457,42 @@ buffered_data_return_t demodulateQAM(const sample_double_t *sample, QAM_properti
     if(timingSyncBuffer.n < symbolSamplerNextIndex) // check if it's too early
         return AWAITING_SAMPLES;    // it's too early, wait till the right number of IQ samples has passed.
 
-    symbolSamplerAccumulatedPhase += symbolSamplerPhaseRate;    // apply the phase offset
-    symbolSamplerNextIndex = (int)ceil(symbolSamplerAccumulatedPhase); // determine the next index to make calculations
 
     if(symbolSamplerAccumulatedPhase == 0)
     {
         // initialize phase rate
         symbolSamplerPhaseRate = QAMstate.symbolPeriod; // initialize the phase rate to the idealized value
-        symbolSamplerNextIndex = symbolSamplerPhaseRate;    // trigger calculations one period from now
+        symbolSamplerAccumulatedPhase = symbolSamplerPhaseRate;    // trigger calculations one period from now
+        symbolSamplerNextIndex = (int)ceil(symbolSamplerAccumulatedPhase);    // trigger calculations one period from now
         return AWAITING_SAMPLES;
     }
 
     // Gardner Algorithm
     //  this can happen just once per IQ symbol, so not every audio sample
     int postIdealIndex =  timingSyncBuffer.insertionIndex - 1;
-    postIdealIndex =    postIdealIndex < 0 ? timingSyncBuffer.length + postIdealIndex : postIdealIndex;     // wrap to positive
     int preIdealIndex = postIdealIndex - 1;
-    preIdealIndex =     preIdealIndex < 0 ? timingSyncBuffer.length + preIdealIndex : preIdealIndex;        // wrap
     int postMidIndex =  postIdealIndex - QAMstate.symbolPeriod / 2;
-    postMidIndex =      postMidIndex < 0 ? timingSyncBuffer.length + postMidIndex : postMidIndex;           // wrap
     int preMidIndex =   postMidIndex - 1;
+
+    int postIdealIndexPlot = postIdealIndex;
+    int preIdealIndexPlot = preIdealIndex;
+    int postMidIndexPlot = postMidIndex;
+    int preMidIndexPlot = preMidIndex;
+
+    postIdealIndex =    postIdealIndex < 0 ? timingSyncBuffer.length + postIdealIndex : postIdealIndex;     // wrap to positive
+    preIdealIndex =     preIdealIndex < 0 ? timingSyncBuffer.length + preIdealIndex : preIdealIndex;        // wrap
+    postMidIndex =      postMidIndex < 0 ? timingSyncBuffer.length + postMidIndex : postMidIndex;           // wrap
     preMidIndex =       preMidIndex < 0 ? timingSyncBuffer.length + preMidIndex : preMidIndex;              // wrap
 
     //  Interpolation between samples
-    double complex IQmidpoint = (timingSyncBuffer.buffer[preMidIndex] - timingSyncBuffer.buffer[postMidIndex]) * fmod(symbolSamplerAccumulatedPhase, 1) + timingSyncBuffer.buffer[preMidIndex];
+    //double complex IQmidpoint = (timingSyncBuffer.buffer[preMidIndex] - timingSyncBuffer.buffer[postMidIndex]) * fmod(symbolSamplerAccumulatedPhase, 1) + timingSyncBuffer.buffer[preMidIndex];
+    //double complex IQmidpoint = -(timingSyncBuffer.buffer[preMidIndex] - timingSyncBuffer.buffer[postMidIndex]) * (1 -fmod(symbolSamplerAccumulatedPhase, 1)) + timingSyncBuffer.buffer[postMidIndex];
+    double complex IQmidpoint = -(timingSyncBuffer.buffer[preMidIndex] - timingSyncBuffer.buffer[postMidIndex]) * (symbolSamplerNextIndex - symbolSamplerAccumulatedPhase) + timingSyncBuffer.buffer[postMidIndex];
     static double complex IQideal = 0;
     double complex IQlast = IQideal;
-    IQideal = (timingSyncBuffer.buffer[preIdealIndex] - timingSyncBuffer.buffer[postIdealIndex]) * fmod(symbolSamplerAccumulatedPhase, 1) + timingSyncBuffer.buffer[preIdealIndex];
+    //IQideal = (timingSyncBuffer.buffer[preIdealIndex] - timingSyncBuffer.buffer[postIdealIndex]) * fmod(symbolSamplerAccumulatedPhase, 1) + timingSyncBuffer.buffer[preIdealIndex];
+    //IQideal = -(timingSyncBuffer.buffer[preIdealIndex] - timingSyncBuffer.buffer[postIdealIndex]) * (1 - fmod(symbolSamplerAccumulatedPhase, 1)) + timingSyncBuffer.buffer[postIdealIndex];
+    IQideal = -(timingSyncBuffer.buffer[preIdealIndex] - timingSyncBuffer.buffer[postIdealIndex]) * (symbolSamplerNextIndex - symbolSamplerAccumulatedPhase) + timingSyncBuffer.buffer[postIdealIndex];
 
     // calculate error signal
     double symbolSamplerPhaseErrorEstimate = creal((IQideal - IQlast) * conj(IQmidpoint));  // this should get us a rough
@@ -497,10 +506,66 @@ buffered_data_return_t demodulateQAM(const sample_double_t *sample, QAM_properti
 
     if(debugPlots.QAMdecoderEnabled)
     {
-        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f", timingSyncBuffer.n, 7, symbolSamplerPhaseErrorEstimate);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", postIdealIndexPlot - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n - 1, 8, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", postIdealIndexPlot - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n, 8, creal(timingSyncBuffer.buffer[postIdealIndex]));
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", postIdealIndexPlot - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n + 1, 8, 0);
+
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", postIdealIndexPlot - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n - 1, 9, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", postIdealIndexPlot - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n, 9, cimag(timingSyncBuffer.buffer[postIdealIndex]));
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", postIdealIndexPlot - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n + 1, 9, 0);
+
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", preIdealIndexPlot - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n - 1, 10, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", preIdealIndexPlot - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n, 10, creal(timingSyncBuffer.buffer[preIdealIndex]));
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", preIdealIndexPlot - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n + 1, 10, 0);
+
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", preIdealIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n - 1, 11, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", preIdealIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n, 11, cimag(timingSyncBuffer.buffer[preIdealIndex]));
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", preIdealIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n + 1, 11, 0);
+
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", postMidIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n - 1, 12, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", postMidIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n, 12, creal(timingSyncBuffer.buffer[postMidIndex]));
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", postMidIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n + 1, 12, 0);
+
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", postMidIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n - 1, 13, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", postMidIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n, 13, cimag(timingSyncBuffer.buffer[postMidIndex]));
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", postMidIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n + 1, 13, 0);
+
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", preMidIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n - 1, 14, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", preMidIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n, 14, creal(timingSyncBuffer.buffer[preMidIndex]));
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", preMidIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n + 1, 14, 0);
+
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", preMidIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n - 1, 15, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", preMidIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n, 15, cimag(timingSyncBuffer.buffer[preMidIndex]));
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", preMidIndex - timingSyncBuffer.insertionIndex+1 + timingSyncBuffer.n + 1, 15, 0);
+
+        //fprintf(debugPlots.QAMdecoderStdin, "%f %i %f\n", symb
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", timingSyncBuffer.n, 7, symbolSamplerPhaseErrorEstimate);
+
+        fprintf(debugPlots.QAMdecoderStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase - 0.5, 16, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%f %i %f\n", symbolSamplerAccumulatedPhase, 16, creal(IQideal));
+        fprintf(debugPlots.QAMdecoderStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase + 0.5, 16, 0);
+
+        fprintf(debugPlots.QAMdecoderStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase - 0.5, 17, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%f %i %f\n", symbolSamplerAccumulatedPhase, 17, cimag(IQideal));
+        fprintf(debugPlots.QAMdecoderStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase + 0.5, 17, 0);
+
+        fprintf(debugPlots.QAMdecoderStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase - QAMstate.symbolPeriod / 2 - 0.5, 18, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%f %i %f\n", symbolSamplerAccumulatedPhase - QAMstate.symbolPeriod / 2, 18, creal(IQmidpoint));
+        fprintf(debugPlots.QAMdecoderStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase - QAMstate.symbolPeriod / 2 + 0.5, 18, 0);
+
+        fprintf(debugPlots.QAMdecoderStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase - QAMstate.symbolPeriod / 2 - 0.5, 19, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%f %i %f\n", symbolSamplerAccumulatedPhase - QAMstate.symbolPeriod / 2, 19, cimag(IQmidpoint));
+        fprintf(debugPlots.QAMdecoderStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase - QAMstate.symbolPeriod / 2 + 0.5, 19, 0);
+
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", symbolSamplerNextIndex, 20, 0);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", symbolSamplerNextIndex, 20, 10);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", symbolSamplerNextIndex, 20, -10);
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %i\n", symbolSamplerNextIndex, 20, 0);
     }
 
     // update the phase rate for symbol sampler
+    symbolSamplerAccumulatedPhase += symbolSamplerPhaseRate;    // apply the phase offset
+    symbolSamplerNextIndex = (int)ceil(symbolSamplerAccumulatedPhase); // determine the next index to make calculations
 
     // Costas loop for Phase locking
     //  happens every IQ symbol
@@ -764,7 +829,7 @@ int main(void)
 {
     // length of each symbol in samples, and so the fft window.
     // This is the period of time all the orthogonal symbols will be integrated over
-#define SYMBOL_PERIOD 64
+#define SYMBOL_PERIOD 32
     // the OFDM channel number, how many cycles per symbol
     int k = 4;
     // buffer is the length of the symbol period, so that symbols are orthogonal
@@ -1009,6 +1074,19 @@ int main(void)
         "--legend 5 \"I\" "
         "--legend 6 \"Q\" "
         "--legend 7 \"Phase error signal\" "
+        "--legend 8 \"Post Ideal I\" "
+        "--legend 9 \"Post Ideal Q\" "
+        "--legend 10 \"Pre ideal I\" "
+        "--legend 11 \"Pre ideal Q\" "
+        "--legend 12 \"Post Mid I\" "
+        "--legend 13 \"Post Mid Q\" "
+        "--legend 14 \"Pre Mid I\" "
+        "--legend 15 \"Pre Mid Q\" "
+        "--legend 16 \"Interpolated ideal I\" "
+        "--legend 17 \"Interpolated ideal Q\" "
+        "--legend 18 \"Interpolated mid I\" "
+        "--legend 19 \"Interpolated mid Q\" "
+        "--legend 20 \"sample time Ceil\" "
     ;
     debugPlots.QAMdecoderStdin = popen(QAMdemodulatePlot, "w");
     if(debugPlots.QAMdecoderStdin == NULL)
@@ -1046,7 +1124,7 @@ int main(void)
             fprintf(debugPlots.waveformPlotStdin, "%i %f\n", sample.sampleIndex, sample.sample);
 
         QAM_properties_t QAMstate;
-        QAMstate.carrierFrequency = (double)sample.sampleRate / 64;
+        QAMstate.carrierFrequency = (double)sample.sampleRate / SYMBOL_PERIOD;
         QAMstate.carrierPhase = 0;
         QAMstate.k = 1;
         QAMstate.symbolPeriod = (int)(sample.sampleRate / QAMstate.carrierFrequency);

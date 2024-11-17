@@ -12,7 +12,11 @@
 
 #define WARN_UNUSED __attribute__((warn_unused_result))
 
-#define DEBUG_LEVEL 0
+#define DEBUG_LEVEL 1
+#if DEBUG_LEVEL >= 1
+    FILE* hexdumpStdIn = NULL;
+    FILE* plotStdIn = NULL;
+#endif
 
 typedef enum
 {
@@ -59,7 +63,7 @@ iqsample_t alternateI(int symbolIndex)
     return sample;
 }
 
-iqsample_t randomQAM(int symbolIndex, int square)
+iqsample_t randomQAM(int square)
 {
     // square is the number of states of I and of Q, total states is square squared
     iqsample_t sample = {0, 0};
@@ -71,7 +75,7 @@ iqsample_t randomQAM(int symbolIndex, int square)
 iqsample_t randomQAM_withPreamble(int symbolIndex, int square)
 {
     iqsample_t sample = {0, 0};
-    srand(symbolIndex); // to get a stable random sequence everytime a specific symbol is requested
+    srand((unsigned int)symbolIndex); // to get a stable random sequence everytime a specific symbol is requested
     int preamble = 150; // length of preamble in symbols
     if (symbolIndex < preamble)
     {
@@ -79,7 +83,7 @@ iqsample_t randomQAM_withPreamble(int symbolIndex, int square)
         sample = alternateI(symbolIndex);
     } else { // choose a new random QAM IQ value at start of every total period
         // then start sending random data
-        sample = randomQAM(symbolIndex - preamble, square);
+        sample = randomQAM(square);
     }
     return sample;
 }
@@ -128,7 +132,7 @@ double raisedCosQAM(int n, int sampleRate)
     // This is a sorta bug. the fact that everything is based on these integers is an issue. I think it causes discretization of carrier
     // frequency and symbol periods, which means the output frequency is not what you put in. for example, 5000 Hz input turns out to be
     // about 5500 Hz actual
-    int symbolPeriod = sampleRate / carrierFrequency * k; // audio samples per symbol
+    int symbolPeriod = (int)(sampleRate / carrierFrequency * k); // audio samples per symbol
     int filterSides = 10;    // number of symbols to either side of current symbol to filter with raised cos
     int filterLengthSymbols = 2 * filterSides + 1;    // length of raised cos filter in IQ symbols, ie, how many IQ samples we need to generate the current symbol
     int filterLength = filterLengthSymbols * symbolPeriod;  // length in audio samples
@@ -137,7 +141,8 @@ double raisedCosQAM(int n, int sampleRate)
     // phase offset that cycles through sequentially all phase offsets
     int phaseOffset = n *  2 / 1200 % symbolPeriod;
     //int phaseOffset = 
-    n+=phaseOffset;
+    int originalN = n;
+    n = n < 0 ? 0 : n - phaseOffset, 0;
 
     // concept:
     //  generate the raised cos filter data once
@@ -148,7 +153,7 @@ double raisedCosQAM(int n, int sampleRate)
     if(!initialized)
     {
         // initialize raised cos filter data
-        filter = malloc(sizeof(double) * filterLength); // this never gets released. so, might wanna fix that TODO
+        filter = malloc((unsigned int)(sizeof(double) * filterLength)); // this never gets released. so, might wanna fix that TODO
         for(int i = 0; i < filterLength; i++)
         {
             int filter_symbolIndex = i - filterLength / 2;    // should go -filterLength/2 -> 0 -> filterLength/2
@@ -164,7 +169,7 @@ double raisedCosQAM(int n, int sampleRate)
         }
 
         // generate enough IQ samples for first audio sample
-        IQdata = malloc(sizeof(iqsample_t) * filterLengthSymbols);  // TODO this is never freed. These should prob be passed in as a paramter and freed somewhere in the larger scope
+        IQdata = malloc((unsigned int)(sizeof(iqsample_t) * filterLengthSymbols));  // TODO this is never freed. These should prob be passed in as a paramter and freed somewhere in the larger scope
         for(int i = 0; i < filterLengthSymbols; i++)
         {
             int IQIndex = i - filterLengthSymbols / 2;    // shoud go from -filterlengthsymbols / 2 -> 0 -> filterlengthsymbols / 2
@@ -175,8 +180,8 @@ double raisedCosQAM(int n, int sampleRate)
                 IQIndex = filterLengthSymbols + IQIndex;    // make positive
                 IQdata[IQIndex % filterLengthSymbols] = sample; // the negative time samples are 0
             } else {
-                IQdata[IQIndex % filterLengthSymbols] = alternateI(IQIndex);
-                //IQdata[IQIndex % filterLengthSymbols] = randomQAM(IQIndex, 2);
+                //IQdata[IQIndex % filterLengthSymbols] = alternateI(IQIndex);
+                IQdata[IQIndex % filterLengthSymbols] = randomQAM(2);
                 //IQdata[IQIndex % filterLengthSymbols] = sequentialIQ(IQIndex, 4);
                 //IQdata[IQIndex % filterLengthSymbols] = randomQAM_withPreamble(IQIndex, 2);
             }
@@ -189,6 +194,7 @@ double raisedCosQAM(int n, int sampleRate)
     // current symbol number
     int symbolIndex = n / symbolPeriod;
     int sampleIndex = n % symbolPeriod; // index of each sample in a symbol, where as n is increasing for the whole signal
+    //printf("phaseOffset: %i\tn: %i\tsymbolIndex: %i\tsampleIndex: %i\n", phaseOffset, n, symbolIndex, sampleIndex);
     //int sampleIndex = fmod(n, symbolPeriod); // index of each sample in a symbol, where as n is increasing for the whole signal
     // circular buffer index
     int IQsampleIndex = symbolIndex % filterLengthSymbols;    // IQdata[IQsampleIndex] is current IQ sample, indexes above are future IQdata and below past IQ data both wrapping around until the are filterLengthSymbols / 2 away from current sample index
@@ -197,8 +203,8 @@ double raisedCosQAM(int n, int sampleRate)
     //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = alternateI(symbolIndex + filterLengthSymbols / 2);
     if(sampleIndex == 0)
     {
-        IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = alternateI(symbolIndex + filterLengthSymbols / 2);
-        //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = randomQAM(symbolIndex + filterLengthSymbols / 2, 2);
+        //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = alternateI(symbolIndex + filterLengthSymbols / 2);
+        IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = randomQAM(2);
         //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = sequentialIQ(symbolIndex + filterLengthSymbols / 2, 4);
         //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = randomQAM_withPreamble(symbolIndex + filterLengthSymbols / 2, 2);
     }
@@ -241,6 +247,7 @@ double raisedCosQAM(int n, int sampleRate)
         (filteredIQsample.I) * cos(2.0 * M_PI * sampleIndex * k / symbolPeriod) +
         (filteredIQsample.Q) * sin(2.0 * M_PI * sampleIndex * k / symbolPeriod)
     ) / 2.0 * sqrt(2.0);
+    fprintf(plotStdIn, "%i %i %i %i %i %i %f %i %i\n", originalN, 0, symbolIndex, 1, sampleIndex, 2, audioSample, 3, phaseOffset);
 
    return audioSample;
 
@@ -250,8 +257,8 @@ double raisedCosQAM(int n, int sampleRate)
 static double singleChannelODFM_noguard(int n, int sampleRate)
 {
     int symbolPeriod = 256;
-    //int guardPeriod = 4./1000 * sampleRate;     // I've found that the echos in a room last for about 3ms, durring that period, the symbol is phase offset and otherwise changed due to the last symbol and the transition between symbols
-    int guardPeriod = 0;    // have to disable for QAM, ie, set to 0, instead use a raised cosine filter for ISI combat
+    int guardPeriod = 4./1000 * sampleRate;     // I've found that the echos in a room last for about 3ms, durring that period, the symbol is phase offset and otherwise changed due to the last symbol and the transition between symbols
+    //int guardPeriod = 0;    // have to disable for QAM, ie, set to 0, instead use a raised cosine filter for ISI combat
     int totalPeriod = symbolPeriod + guardPeriod;
     int k = 16;      // this is effectively the OFDM channel number, how many cycles per sample period
 
@@ -274,8 +281,8 @@ static double singleChannelODFM_noguard(int n, int sampleRate)
 
     // random IQ in constelation defined by power
     int power = 2;  // log base2 of number of symbols. number of symbols should also be a perfect square
-    int symbols = pow(2, power);
-    int square = sqrt(symbols);
+    int symbols = (int)pow(2, power);
+    int square = (int)sqrt(symbols);
 
     // get IQ samples from the IQ sampling function
     sample = randomQAM_withPreamble(symbolIndex, square);
@@ -403,22 +410,20 @@ typedef struct __attribute__((packed))
     };
 } int32_to_bytes_t;
 
+
 static int WARN_UNUSED generateSamplesAndOutput(char* filenameInput)
 {
     int retval = 0;
 
     FILE* aplayStdIn = NULL;
 
-#if DEBUG_LEVEL >= 1
-    FILE* hexdumpStdIn = NULL;
-#endif
 
     int fileDescriptor = -1;
 
     // audio sample rate
     int sampleRate = 44100;
     // total number of samples to generate
-    long length = sampleRate * 5;
+    long length = sampleRate * 1;
     // the number of the current sample
     long n = 0;
 
@@ -480,6 +485,13 @@ static int WARN_UNUSED generateSamplesAndOutput(char* filenameInput)
             goto exit;
         }
     }
+    char *plotstr = 
+        "feedgnuplot "
+        "--domain --dataid --lines --points "
+        "--title \"Debug modulator\" "
+        "--xlabel \"Time (n)\" --ylabel \"value\" "
+    ;
+    plotStdIn = popen(plotstr, "w");
 #endif
 
     if (outputstd == 0)
@@ -561,7 +573,7 @@ static int WARN_UNUSED generateSamplesAndOutput(char* filenameInput)
             #if DEBUG_LEVEL >= 1
                 if (outputstd == 0)
                 {
-                    putc(byte, hexdumpStdIn);
+                    //putc(byte, hexdumpStdIn);
                 }
                 else
                 {
@@ -595,6 +607,7 @@ exit:
     {
     #if DEBUG_LEVEL >= 1
         pclose(hexdumpStdIn);
+        pclose(plotStdIn);
     #endif
 
         close(fileDescriptor);
