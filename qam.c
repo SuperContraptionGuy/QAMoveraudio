@@ -12,7 +12,7 @@
 
 #define WARN_UNUSED __attribute__((warn_unused_result))
 
-#define DEBUG_LEVEL 0
+#define DEBUG_LEVEL 1
 #if DEBUG_LEVEL >= 1
     FILE* hexdumpStdIn = NULL;
     FILE* plotStdIn = NULL;
@@ -56,9 +56,24 @@ typedef struct
 
 
 // some functions to generate IQ streams with different properties
+iqsample_t impulse(int symbolIndex, int impulseTime)
+{
+    iqsample_t sample = {0, 0};
+    if(symbolIndex == impulseTime)
+        sample.I = 1;
+    return sample;
+}
+
 iqsample_t alternateI(int symbolIndex)
 {
     iqsample_t sample = {symbolIndex % 2 * 2 - 1, 0};
+    //iqsample_t sample = {symbolIndex % 2, 0};
+    return sample;
+}
+
+iqsample_t alternateQ(int symbolIndex)
+{
+    iqsample_t sample = {0, symbolIndex % 2 * 2 - 1};
     //iqsample_t sample = {symbolIndex % 2, 0};
     return sample;
 }
@@ -194,7 +209,9 @@ double raisedCosQAM(int n, int sampleRate)
                 IQIndex = filterLengthSymbols + IQIndex;    // make positive
                 IQdata[IQIndex % filterLengthSymbols] = sample; // the negative time samples are 0
             } else {
+                //IQdata[IQIndex % filterLengthSymbols] = impulse(IQIndex, 20);
                 //IQdata[IQIndex % filterLengthSymbols] = alternateI(IQIndex);
+                //IQdata[IQIndex % filterLengthSymbols] = alternateQ(IQIndex);
                 //IQdata[IQIndex % filterLengthSymbols] = randomQAM(2);
                 //IQdata[IQIndex % filterLengthSymbols] = sequentialIQ(IQIndex, 4);
                 IQdata[IQIndex % filterLengthSymbols] = randomQAM_withPreamble(IQIndex, 2);
@@ -218,10 +235,12 @@ double raisedCosQAM(int n, int sampleRate)
     if(sampleIndex == 0)
     {
         int IQindex = (IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols;
+        //IQdata[IQindex] = impulse(symbolIndex + filterLengthSymbols / 2, 20);
         //IQdata[IQindex] = alternateI(symbolIndex + filterLengthSymbols / 2);
-        //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = randomQAM(2);
-        //IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = sequentialIQ(symbolIndex + filterLengthSymbols / 2, 4);
-        IQdata[(IQsampleIndex + filterLengthSymbols / 2) % filterLengthSymbols] = randomQAM_withPreamble(symbolIndex + filterLengthSymbols / 2, 2);
+        //IQdata[IQindex] = alternateQ(symbolIndex + filterLengthSymbols / 2);
+        //IQdata[IQindex] = randomQAM(2);
+        //IQdata[IQindex] = sequentialIQ(symbolIndex + filterLengthSymbols / 2, 4);
+        IQdata[IQindex] = randomQAM_withPreamble(symbolIndex + filterLengthSymbols / 2, 2);
         IQindex = IQsampleIndex;
     #if DEBUG_LEVEL > 0
         fprintf(plotStdIn, "%i %i %f %i %f\n", originalN, 6, IQdata[IQsampleIndex].I, 7, IQdata[IQsampleIndex].Q);
@@ -527,7 +546,6 @@ static int WARN_UNUSED generateSamplesAndOutput(char* filenameInput)
         "--legend 5 \"Filtered Q\" "
         "--legend 6 \"I\" "
         "--legend 7 \"Q\" "
-
     ;
     plotStdIn = popen(plotstr, "w");
 #endif
@@ -643,17 +661,20 @@ static int WARN_UNUSED generateSamplesAndOutput(char* filenameInput)
     }
 
 exit:
+    pclose(aplayStdIn);
     if (outputstd == 0)
     {
-    #if DEBUG_LEVEL >= 1
+        close(fileDescriptor);
+
+    #if DEBUG_LEVEL > 0
         pclose(hexdumpStdIn);
+    #endif
+    }
+
+    #if DEBUG_LEVEL > 0
         pclose(plotStdIn);
     #endif
 
-        close(fileDescriptor);
-    }
-
-    pclose(aplayStdIn);
 
     return retval;
 }

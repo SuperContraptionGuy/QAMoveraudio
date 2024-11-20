@@ -255,7 +255,8 @@ buffered_data_return_t raisedCosFilter(const circular_buffer_complex_t *inputSam
     //int filterLength = filterLengthSymbols * symbolPeriod;  // length in audio samples
 
     //double filterCutoffFrequency = cutoffFrequency * 1.25; // cutoff frequency of the low pass filter
-    double filterCutoffFrequency = 500. * 1.25; // cutoff frequency of the low pass filter
+    double filterCutoffFrequency = cutoffFrequency; // cutoff frequency of the low pass filter
+    //double filterCutoffFrequency = 500. * 1.25; // cutoff frequency of the low pass filter
 
     // array to store timeseries of IQ samples
     //static double complex *IQdata;
@@ -272,7 +273,8 @@ buffered_data_return_t raisedCosFilter(const circular_buffer_complex_t *inputSam
         {
             int filterIndex = i - inputSamples->length / 2;    // should go -filterLength/2 -> 0 -> filterLength/2
             // raised cos filter math
-            double b = 0.42;    // filter parameter beta, has to do with frequency falloff and time domain fall off
+            //double b = 0.42;    // filter parameter beta, has to do with frequency falloff and time domain fall off
+            double b = 0.3;    // filter parameter beta, has to do with frequency falloff and time domain fall off
 
             double filterValue =
             (
@@ -358,6 +360,14 @@ buffered_data_return_t raisedCosFilter(const circular_buffer_complex_t *inputSam
 
 buffered_data_return_t gardnerAlgorithm(const circular_buffer_complex_t *inputSamples, sample_complex_t *outputSamples, double symbolPeriod, debugPlots_t debugPlots)
 {
+    // now do some timing alignemnt.
+    //      I'm imagining a clock that counts up by a phase quantity scaled by the number of IQ samples elapsed. accumulates phase
+    //      The rate of phase change will be adjusted by a PLL
+    //      The zero crossing for the clock will be projected so that the two samples it falls between can be chosen.
+    //      I'll keep an array of past IQ samples to choose from.
+    //      The next filteredIQsample.sampleIndex where calculations will occur is calculated by the projection
+    //          concept after PLL updates during said calculations
+
     // Choosing samples for timing lock and symbol detection
     static double symbolSamplerAccumulatedPhase = 0;
     static double symbolSamplerPhaseRate = 0;
@@ -458,13 +468,13 @@ buffered_data_return_t gardnerAlgorithm(const circular_buffer_complex_t *inputSa
         //fprintf(debugPlots.gardnerAlgoStdin, "%f %i %f\n", symb
         fprintf(debugPlots.gardnerAlgoStdin, "%i %i %f\n", inputSamples->n, 7, symbolSamplerPhaseErrorEstimate);
 
-        fprintf(debugPlots.gardnerAlgoStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase - 0.5, 16, 0);
+        //fprintf(debugPlots.gardnerAlgoStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase - 0.5, 16, 0);
         fprintf(debugPlots.gardnerAlgoStdin, "%f %i %f\n", symbolSamplerAccumulatedPhase, 16, creal(IQideal));
-        fprintf(debugPlots.gardnerAlgoStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase + 0.5, 16, 0);
+        //fprintf(debugPlots.gardnerAlgoStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase + 0.5, 16, 0);
 
-        fprintf(debugPlots.gardnerAlgoStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase - 0.5, 17, 0);
+        //fprintf(debugPlots.gardnerAlgoStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase - 0.5, 17, 0);
         fprintf(debugPlots.gardnerAlgoStdin, "%f %i %f\n", symbolSamplerAccumulatedPhase, 17, cimag(IQideal));
-        fprintf(debugPlots.gardnerAlgoStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase + 0.5, 17, 0);
+        //fprintf(debugPlots.gardnerAlgoStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase + 0.5, 17, 0);
 
         fprintf(debugPlots.gardnerAlgoStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase - symbolPeriod / 2 - 0.5, 18, 0);
         fprintf(debugPlots.gardnerAlgoStdin, "%f %i %f\n", symbolSamplerAccumulatedPhase - symbolPeriod / 2, 18, creal(IQmidpoint));
@@ -566,7 +576,7 @@ buffered_data_return_t demodulateQAM(const sample_double_t *sample, QAM_properti
     sample_complex_t filteredIQsample;
 
     // filter the IQ samples
-    buffered_data_return_t returnValue = raisedCosFilter(&filterInputBuffer, &filteredIQsample, QAMstate.carrierFrequency, debugPlots);
+    buffered_data_return_t returnValue = raisedCosFilter(&filterInputBuffer, &filteredIQsample, QAMstate.carrierFrequency * 1, debugPlots);
 
     filterInputBuffer.insertionIndex = (filterInputBuffer.insertionIndex + 1) % filterInputBuffer.length;
 
@@ -575,14 +585,18 @@ buffered_data_return_t demodulateQAM(const sample_double_t *sample, QAM_properti
 
     if(debugPlots.QAMdecoderEnabled)
         fprintf(debugPlots.QAMdecoderStdin, "%i %i %f %i %f\n", filteredIQsample.sampleIndex, 5, creal(filteredIQsample.sample), 6, cimag(filteredIQsample.sample));
-
-    // now do some timing alignemnt.
-    //      I'm imagining a clock that counts up by a phase quantity scaled by the number of IQ samples elapsed. accumulates phase
-    //      The rate of phase change will be adjusted by a PLL
-    //      The zero crossing for the clock will be projected so that the two samples it falls between can be chosen.
-    //      I'll keep an array of past IQ samples to choose from.
-    //      The next filteredIQsample.sampleIndex where calculations will occur is calculated by the projection
-    //          concept after PLL updates during said calculations
+    if(debugPlots.eyeDiagramRealEnabled)
+        fprintf(debugPlots.eyeDiagramRealStdin, "%i %i %f\n",
+                filteredIQsample.sampleIndex % ((int)QAMstate.symbolPeriod * 4), 
+                filteredIQsample.sampleIndex / ((int)QAMstate.symbolPeriod * 4),
+                creal(filteredIQsample.sample)
+                );
+    if(debugPlots.eyeDiagramImaginaryEnabled)
+        fprintf(debugPlots.eyeDiagramImaginaryStdin, "%i %i %f\n",
+                filteredIQsample.sampleIndex % ((int)QAMstate.symbolPeriod * 4), 
+                filteredIQsample.sampleIndex / ((int)QAMstate.symbolPeriod * 4),
+                cimag(filteredIQsample.sample)
+                );
 
     // collect samples into a buffer
     timingSyncBuffer.buffer[timingSyncBuffer.insertionIndex] = filteredIQsample.sample;
@@ -593,12 +607,11 @@ buffered_data_return_t demodulateQAM(const sample_double_t *sample, QAM_properti
 
     timingSyncBuffer.insertionIndex = (timingSyncBuffer.insertionIndex + 1) % timingSyncBuffer.length;
 
-
     if(returnValue != RETURNED_SAMPLE)
         return AWAITING_SAMPLES;
 
 
-    // Costas loop for Phase locking
+    // Costas loop for precise Phase locking
     //  happens every IQ symbol
 
     //outputSample = ;  // output the determined IQ data
@@ -1148,6 +1161,8 @@ int main(void)
     //debugPlots.QAMdecoderEnabled = 1;
     //debugPlots.filterDebugEnabled = 1;
     debugPlots.gardnerAlgoEnabled = 1;
+    debugPlots.eyeDiagramRealEnabled = 1;
+    debugPlots.eyeDiagramImaginaryEnabled = 1;
 
 
     // while there is data to recieve, not end of file -> right now just a fixed number of 2000
