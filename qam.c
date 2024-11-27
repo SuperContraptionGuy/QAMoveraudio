@@ -12,7 +12,7 @@
 
 #define WARN_UNUSED __attribute__((warn_unused_result))
 
-#define DEBUG_LEVEL 1
+#define DEBUG_LEVEL 0
 #if DEBUG_LEVEL >= 1
     FILE* hexdumpStdIn = NULL;
     FILE* plotStdIn = NULL;
@@ -156,13 +156,13 @@ double raisedCosQAM(int n, int sampleRate)
 
     // phase offset that cycles through sequentially all phase offsets
     //int phaseOffset = n *  2 / 1200 % symbolPeriod;
-    int phaseOffset = 0;
+    //int phaseOffset = 0;
     
-    /*
+    ///*
     static int phaseOffset = -1;
     if (phaseOffset == -1)
         phaseOffset = rand() % symbolPeriod;
-    */
+    //*/
     /*
     static int phaseOffset = -1;
     if (phaseOffset == -1 || (n % (carrierPeriod * 30)) == 0)
@@ -370,6 +370,7 @@ static double WARN_UNUSED calculateSample(int n, int sampleRate)
     return 0;
     */
     return raisedCosQAM(n, sampleRate) * amplitudeScaler;
+    //return impulse(n % (int)(44100 * 0.13 * 1.5), 0).I;
     //return singleChannelODFM_noguard(n, sampleRate) * amplitudeScaler;
 }
 
@@ -433,9 +434,11 @@ static int WARN_UNUSED writeHeader(int length, int fileDescriptor)
     }
 
 exit:
-    if (hexdumpInput != NULL)
+    if (hexdumpInput != NULL && fork() == 0)
     {
         pclose(hexdumpInput);
+        exit(0);
+        return 0;
     }
 #endif
 
@@ -471,7 +474,7 @@ static int WARN_UNUSED generateSamplesAndOutput(char* filenameInput)
     // audio sample rate
     int sampleRate = 44100;
     // total number of samples to generate
-    long length = sampleRate * 1;
+    long length = sampleRate * 19.5;
     // the number of the current sample
     long n = 0;
 
@@ -671,10 +674,17 @@ exit:
     #endif
     }
 
-    #if DEBUG_LEVEL > 0
+#if DEBUG_LEVEL > 0
+    if(plotStdIn != NULL && fork() == 0)
+    {
+        // it's holding onto a reference to stdout, gotta close that off
+        //freopen("/dev/null", "w", stdout);
+        // nope, that wasn't it
         pclose(plotStdIn);
-    #endif
-
+        exit(0);
+        return 0;
+    }
+#endif
 
     return retval;
 }

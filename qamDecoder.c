@@ -172,6 +172,7 @@ typedef struct
     FILE* filterDebugStdin;
     FILE* QAMdecoderStdin;
     FILE* gardnerAlgoStdin;
+    FILE* channelFilterStdin;
     union
     {
         struct
@@ -186,6 +187,7 @@ typedef struct
             unsigned int filterDebugEnabled         : 1;
             unsigned int QAMdecoderEnabled          : 1;
             unsigned int gardnerAlgoEnabled         : 1;
+            unsigned int channelFilterEnabled       : 1;
         };
             unsigned long int flags;
     };
@@ -217,6 +219,7 @@ typedef struct
     int insertionIndex;     // the index where new data is inserted into the circular buffer
     int phase;              // used for some functions choosing when to do periodic calculations with the buffer
     int sampleRate;
+    int n;
 } circular_buffer_double_t;
 typedef struct
 {
@@ -233,6 +236,158 @@ typedef enum
     RETURNED_SAMPLE,
     AWAITING_SAMPLES,
 } buffered_data_return_t;
+
+buffered_data_return_t channelFilter(const circular_buffer_double_t *inputSamples, sample_double_t *outputSample, circular_buffer_double_t *impulseResponse, debugPlots_t debugPlots)
+{
+    // generate the filter from the inpulseResonse of the channel, hopefully rarely, let's just say once for now?
+    static double *filter = NULL;
+    static circular_buffer_complex_t frequencyResponse = {0};
+    static circular_buffer_complex_t reciprocalFrequencyResponse = {0};
+    static circular_buffer_complex_t  inverseImpulseResponse = {0};
+
+    static int initialized = 0; // have we generated the filter taps
+    static int bufferPrimed = 0;    // have we waited for enough samples to start filtering
+    if(!initialized)
+    {
+        // initialize impulse response for testing
+        // pull the samples from a file called impulseResponse.raw
+        int impulseResponseFile = open("data/impulseResponse.raw", O_RDONLY);
+        if(impulseResponseFile == -1)
+            fprintf(stderr, "unable to open data/impulseResponse.raw file for channel equalization filter.\n");
+        // file format:
+        //  S32_LE PCM mono samples
+        //  so 4 bytes per sample
+        for(int i = 0; i < impulseResponse->length; i++)
+        {
+            // for type punning
+            union __attribute__((packed))
+            {
+               int32_t value;
+               struct
+               {
+                    uint8_t bytes[4];
+               };
+            } readSample;
+
+            // read 4 bytes at a time into the type punning structure
+            int readBytes;
+            if((readBytes = read(impulseResponseFile, &readSample.bytes, sizeof(readSample.bytes))) == 0)
+                fprintf(stderr, "Reached end of impulseResponse.raw before filter was satisfied!\n");
+
+            impulseResponse->buffer[i] = (double)readSample.value / INT32_MAX;    // convert to a double between -1 and 1
+            //impulseResponse->buffer[i] = cos(2*M_PI * 100 * (double)i / impulseResponse->length) + cos(2*M_PI * 2 * (double)i / impulseResponse->length);
+            //impulseResponse->buffer[i] = 0;
+            //impulseResponse->insertionIndex++;
+        }
+        close(impulseResponseFile);
+
+        //  fourier transform the impulseResponse
+
+        frequencyResponse.length = impulseResponse->length;
+        if((frequencyResponse.buffer = calloc(frequencyResponse.length, sizeof(double complex))) == NULL)
+            fprintf(stderr, "Couldn't allocate memory for frequency response buffer: %s\n", strerror(errno));
+        reciprocalFrequencyResponse.length = impulseResponse->length;
+        if((reciprocalFrequencyResponse.buffer = calloc(reciprocalFrequencyResponse.length, sizeof(double complex))) == NULL)
+            fprintf(stderr, "Couldn't allocate memory for reciprocal frequency response buffer: %s\n", strerror(errno));
+        inverseImpulseResponse.length = impulseResponse->length;
+        if((inverseImpulseResponse.buffer = calloc(inverseImpulseResponse.length, sizeof(double complex))) == NULL)
+            fprintf(stderr, "Couldn't allocate memory for inverse impulse response buffer: %s\n", strerror(errno));
+
+        int N = frequencyResponse.length;
+        for(int k = 0; k < N; k++)
+        {
+            for(int x =  0; x < N; x++)
+            {
+                // dft
+                frequencyResponse.buffer[k] += cexp(I*2*M_PI * x/N * k) * impulseResponse->buffer[x];
+            }
+            //  take the reciprical
+            reciprocalFrequencyResponse.buffer[k] = 1. / frequencyResponse.buffer[k];
+
+            //  reverse the fourier transform
+            for(int x =  0; x < N; x++)
+            {
+                // inverse dft (negative phase, and normalization factor below)
+                inverseImpulseResponse.buffer[k] += cexp(-I*2*M_PI * x/N * k) * reciprocalFrequencyResponse.buffer[x];
+            }
+            // normalization factor for inverse dft
+            inverseImpulseResponse.buffer[k] /= (double)inverseImpulseResponse.length / 100;
+        }
+
+
+
+        initialized = 1;
+    }
+    if(debugPlots.channelFilterEnabled)
+    {
+        fprintf(debugPlots.channelFilterStdin, "%i %i %f\n",
+                inputSamples->n,
+                0, inputSamples->buffer[inputSamples->insertionIndex]
+            );
+        if(inputSamples->n < impulseResponse->length)
+            //fprintf(debugPlots.channelFilterStdin, "%i %i %f %i %f %i %f %i %f %i %f %i %f %i %f\n",
+            fprintf(debugPlots.channelFilterStdin, "%i %i %f %i %f\n",
+                    inputSamples->n,
+                    1, impulseResponse->buffer[inputSamples->n % impulseResponse->length],
+                    //3, cabs(frequencyResponse.buffer[(inputSamples->n + frequencyResponse.length / 2) % frequencyResponse.length]),
+                    //4, carg(frequencyResponse.buffer[(inputSamples->n + frequencyResponse.length / 2) % frequencyResponse.length]),
+                    //5, cabs(reciprocalFrequencyResponse.buffer[(inputSamples->n + reciprocalFrequencyResponse.length / 2) % reciprocalFrequencyResponse.length]),
+                    //6, carg(reciprocalFrequencyResponse.buffer[(inputSamples->n + reciprocalFrequencyResponse.length / 2) % reciprocalFrequencyResponse.length]),
+                    7, creal(inverseImpulseResponse.buffer[(inputSamples->n + inverseImpulseResponse.length / 2) % inverseImpulseResponse.length])
+                    //8, carg(inverseImpulseResponse.buffer[(inputSamples->n + inverseImpulseResponse.length / 2) % inverseImpulseResponse.length])
+                );
+    }
+
+    // wait for enough samples to come in to do the first convolution
+    // I don't have to wait, I'm pulling in past samples, and before the first sample, they can be zeros
+    // at least for the test where I convolve the impulse response with the input
+    if(!bufferPrimed)
+    {
+        //if(inputSamples->n < impulseResponse->length - 1)
+        if(inputSamples->n < 25)
+        //if(0)
+            return AWAITING_SAMPLES;
+        bufferPrimed = 1;
+    }
+
+    // just do a test, let's take the impulse response and convolve it with the input samples to simulate the channel
+    outputSample->sample = 0;
+    for(int i = 0; i < impulseResponse->length; i++)
+    {
+        // multiply the filter by the input samples at respective times and sum the results
+        int inputIndex = (inputSamples->insertionIndex - i) % inputSamples->length;
+        if(inputIndex < 0)
+            inputIndex += inputSamples->length;
+        int filterIndex = i;
+
+        outputSample->sample += inputSamples->buffer[inputIndex] * impulseResponse->buffer[filterIndex] * -inverseImpulseResponse.buffer[filterIndex];
+    }
+
+    // now reverse the channel by convolving the inverse filter
+
+
+
+    //outputSample->sampleIndex = inputSamples->n - impulseResponse->length;
+    //outputSample->sampleIndex = inputSamples->n;
+    outputSample->sampleIndex = inputSamples->n - 25;
+    outputSample->sampleRate = inputSamples->sampleRate;
+
+    // test, bypass
+    //outputSample->sample = inputSamples->buffer[inputSamples->insertionIndex];
+
+
+    if(debugPlots.channelFilterEnabled)
+    {
+        fprintf(debugPlots.channelFilterStdin, "%i %i %f\n",
+                outputSample->sampleIndex,
+                2, outputSample->sample
+            );
+
+    }
+    // collect enough input samples ahead of the output timepoint to start filtering
+    // do one step of convolution to get one output sample
+    return RETURNED_SAMPLE;
+}
 
 buffered_data_return_t raisedCosFilter(const circular_buffer_complex_t *inputSamples, sample_complex_t *outputSample, double cutoffFrequency, debugPlots_t debugPlots)
 {
@@ -420,15 +575,38 @@ buffered_data_return_t gardnerAlgorithm(const circular_buffer_complex_t *inputSa
     // calculate error signal
     //      I either need to changed the phaseErrorEstimate to rateOfPhaseErrorEstimate, or else allow the PID loop to set the phase offset directly rather than adjusting it's derivitive
     static double symbolSamplerPhaseErrorEstimate = 0;
+    static double phaseErrorEstimateArray[10];
+    static int phaseErrorEstimateArraySize = 10;
+    static int phaseErrorEstimateArrayIndex = 0;
+
+    // update with new values
     double errorLast = symbolSamplerPhaseErrorEstimate;
     symbolSamplerPhaseErrorEstimate = creal((IQideal - IQlast) * conj(IQmidpoint));  // this should get us a rough sync
-    double error_I = symbolSamplerPhaseErrorEstimate;  // integral is just the value before derivative
-    double error = symbolSamplerPhaseErrorEstimate - errorLast; // error is derivative of phase offset estimate
+
+    // take a rolling average of the error estimate
+    phaseErrorEstimateArray[phaseErrorEstimateArrayIndex] = symbolSamplerPhaseErrorEstimate;
+    phaseErrorEstimateArrayIndex = (phaseErrorEstimateArrayIndex + 1) % phaseErrorEstimateArraySize;
+
+    static double phaseErrorEstimateAverage = 0;
+    double phaseErrorEstimateAverageLast = phaseErrorEstimateAverage;
+    phaseErrorEstimateAverage = 0;
+    for(int i = 0; i < phaseErrorEstimateArraySize; i++)
+    {
+        phaseErrorEstimateAverage += phaseErrorEstimateArray[i];
+    }
+    phaseErrorEstimateAverage /= phaseErrorEstimateArraySize;
+
+
+    //double error_I = symbolSamplerPhaseErrorEstimate;  // integral is just the value before derivative
+    //double error = symbolSamplerPhaseErrorEstimate - errorLast; // error is derivative of phase offset estimate
+    double error_I = phaseErrorEstimateAverage;  // integral is just the value before derivative
+    double error = phaseErrorEstimateAverage - phaseErrorEstimateAverageLast; // error is derivative of phase offset estimate
 
     // this is shitty code, should be a function
     // PID loop
     //symbolSamplerPhaseRate -= error_I * 0.6 + error * 1.5;  // tight for pure alternating I
-    symbolSamplerPhaseRate -= error_I * 0.2 + error * 0.5;  // tight for pure alternating I
+    //symbolSamplerPhaseRate -= error_I * 0.2 + error * 0.5;  // tight for pure alternating I
+    symbolSamplerPhaseRate -= error_I * 0.002 + error * 0.06;  // tight for pure alternating I
     symbolSamplerPhaseRate = fmin(fmax(symbolSamplerPhaseRate, (double)symbolPeriod / 1.5), (double)symbolPeriod * 1.5);
 
     if(debugPlots.gardnerAlgoEnabled)
@@ -467,6 +645,7 @@ buffered_data_return_t gardnerAlgorithm(const circular_buffer_complex_t *inputSa
 
         //fprintf(debugPlots.gardnerAlgoStdin, "%f %i %f\n", symb
         fprintf(debugPlots.gardnerAlgoStdin, "%i %i %f\n", inputSamples->n, 7, symbolSamplerPhaseErrorEstimate);
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %f\n", inputSamples->n, 21, phaseErrorEstimateAverage);
 
         //fprintf(debugPlots.gardnerAlgoStdin, "%f %i %i\n", symbolSamplerAccumulatedPhase - 0.5, 16, 0);
         fprintf(debugPlots.gardnerAlgoStdin, "%f %i %f\n", symbolSamplerAccumulatedPhase, 16, creal(IQideal));
@@ -490,6 +669,26 @@ buffered_data_return_t gardnerAlgorithm(const circular_buffer_complex_t *inputSa
         fprintf(debugPlots.gardnerAlgoStdin, "%i %i %i\n", symbolSamplerNextIndex, 20, 0);
     }
 
+    if(debugPlots.IQplotEnabled)
+        fprintf(debugPlots.IQplotStdin, "%f %i %f\n", creal(IQideal), symbolSamplerNextIndex % (int)symbolPeriod, cimag(IQideal));
+
+    /*
+     * I want this to work in some way to show the IQ plot with the phase offset determined by the timing algorithm
+     * so that it's from the perspective of the timing plot, and we can see the effectiveness of time sync
+    if(debugPlots.eyeDiagramRealEnabled)
+        fprintf(debugPlots.eyeDiagramRealStdin, "%f %i %f\n",
+                fmod(symbolSamplerAccumulatedPhase, symbolPeriod * 4),
+                -1,
+                creal(IQideal)
+                );
+    if(debugPlots.eyeDiagramRealEnabled)
+        fprintf(debugPlots.eyeDiagramRealStdin, "%f %i %f\n",
+                fmod(symbolSamplerAccumulatedPhase - symbolPeriod / 2, symbolPeriod * 4),
+                -1,
+                creal(IQmidpoint)
+                );
+    */
+
     // update the phase rate for symbol sampler
     symbolSamplerAccumulatedPhase += symbolSamplerPhaseRate;    // apply the phase offset
     symbolSamplerNextIndex = (int)ceil(symbolSamplerAccumulatedPhase); // determine the next index to make calculations
@@ -506,27 +705,30 @@ buffered_data_return_t demodulateQAM(const sample_double_t *sample, QAM_properti
     // currently does not handle samples after about half the filter size, instead just using them as future samples, but never getting to them. Should add a command to take care of the remainder I guess and cycle the filter function with zeros until it's done TODO
     static int initialized = 0;
 
+    static circular_buffer_double_t  channelFilterBuffer = {0};
+    static circular_buffer_double_t  impulseResponse = {0};
     static circular_buffer_complex_t filterInputBuffer = {0};
     static circular_buffer_complex_t timingSyncBuffer = {0};
 
-    if (sample == NULL)
-    {
-        if (filterInputBuffer.buffer != NULL)
-        {
-            free(filterInputBuffer.buffer);
-            filterInputBuffer.buffer = NULL;
-        }
-
-        if (timingSyncBuffer.buffer != NULL)
-        {
-            free(timingSyncBuffer.buffer);
-            timingSyncBuffer.buffer = NULL;
-        }
-    }
-
     if(!initialized)
     {
-        // initialization
+        // initialization of circular buffers
+
+        // initialize channel equilztion filter
+        channelFilterBuffer.length = 5912;
+        channelFilterBuffer.insertionIndex = 0;
+        channelFilterBuffer.buffer = calloc(channelFilterBuffer.length, sizeof(double));
+        if(channelFilterBuffer.buffer == NULL)
+            fprintf(stderr, "ChannelFIlterBuffer failed to allocate: %s\n", strerror(errno));
+
+        // initialize impulse response
+        impulseResponse.length = 5912;
+        impulseResponse.insertionIndex = 0;
+        impulseResponse.buffer = calloc(impulseResponse.length, sizeof(double));
+        if(impulseResponse.buffer == NULL)
+            fprintf(stderr, "ImpulseResponse failed to allocate: %s\n", strerror(errno));
+
+        // initialize filter buffer
         filterInputBuffer.length = sample->sampleRate / QAMstate.carrierFrequency * 4 * (10 * 2 + 1);
         filterInputBuffer.insertionIndex = 0;
         //filterInputBuffer.buffer = malloc(sizeof(double complex) * filterInputBuffer.length);   // allocate some space for the buffer
@@ -541,13 +743,55 @@ buffered_data_return_t demodulateQAM(const sample_double_t *sample, QAM_properti
         timingSyncBuffer.buffer = calloc(timingSyncBuffer.length, sizeof(double complex));
         if(timingSyncBuffer.buffer == NULL)
             fprintf(stderr, "TimingSyncBuffer failed to allocate: %s\n", strerror(errno));
+
+
         // only run once
         initialized = 1;
 
     }
 
+    // deallocation of dynamic memory if the input sample is NULL
+    if (sample == NULL)
+    {
+        if(channelFilterBuffer.buffer != NULL)
+        {
+            free(channelFilterBuffer.buffer);
+            channelFilterBuffer.buffer = NULL;
+        }
+        if (filterInputBuffer.buffer != NULL)
+        {
+            free(filterInputBuffer.buffer);
+            filterInputBuffer.buffer = NULL;
+        }
+
+        if (timingSyncBuffer.buffer != NULL)
+        {
+            free(timingSyncBuffer.buffer);
+            timingSyncBuffer.buffer = NULL;
+        }
+    }
+
+    // raw inputs
     if(debugPlots.QAMdecoderEnabled)
         fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", sample->sampleIndex, 0, sample->sample);
+
+    // channel equalization filter
+    channelFilterBuffer.n = sample->sampleIndex;
+    channelFilterBuffer.sampleRate = sample->sampleRate;
+    channelFilterBuffer.phase = 0;
+    channelFilterBuffer.buffer[channelFilterBuffer.insertionIndex] = sample->sample;
+    sample_double_t equalizedSample;
+
+    buffered_data_return_t returnValue = channelFilter(&channelFilterBuffer, &equalizedSample, &impulseResponse, debugPlots);
+
+    channelFilterBuffer.insertionIndex = (channelFilterBuffer.insertionIndex + 1) % channelFilterBuffer.length;
+
+    if(returnValue != RETURNED_SAMPLE)
+        return AWAITING_SAMPLES;
+
+    if(debugPlots.QAMdecoderEnabled)
+        fprintf(debugPlots.QAMdecoderStdin, "%i %i %f\n", equalizedSample.sampleIndex, 1, equalizedSample.sample);
+
 
     // IQ sampling
     //  multiply by sin and cos
@@ -555,28 +799,28 @@ buffered_data_return_t demodulateQAM(const sample_double_t *sample, QAM_properti
     //      the multiplication step generates frequencies in the IQsample centered a  twice the original carrier
     //      frequency. The bandwidth of the signal on that elevated carrier may alias. I should double sample rate before this step,
     //      then reduce the sample rate to fraction of the original after filtering out that high frequency stuff.
-    double complex wave = cexp(I*(2*M_PI * QAMstate.carrierFrequency * sample->sampleIndex / sample->sampleRate + QAMstate.carrierPhase));
-    double complex IQsample = sample->sample * wave;
+    double complex wave = cexp(I*(2*M_PI * QAMstate.carrierFrequency * equalizedSample.sampleIndex / equalizedSample.sampleRate + QAMstate.carrierPhase));
+    double complex IQsample = equalizedSample.sample * wave;
 
     if(debugPlots.filterDebugEnabled)
     {
-        fprintf(debugPlots.filterDebugStdin, "%i %i %f\n", sample->sampleIndex, 0, sample->sample);
-        fprintf(debugPlots.filterDebugStdin, "%i %i %f %i %f\n", sample->sampleIndex, 4, creal(wave), 5, cimag(wave));
+        fprintf(debugPlots.filterDebugStdin, "%i %i %f\n", equalizedSample.sampleIndex, 0, equalizedSample.sample);
+        fprintf(debugPlots.filterDebugStdin, "%i %i %f %i %f\n", equalizedSample.sampleIndex, 4, creal(wave), 5, cimag(wave));
     }
 
     if(debugPlots.gardnerAlgoEnabled)
-        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %f\n", sample->sampleIndex, 0, sample->sample);
+        fprintf(debugPlots.gardnerAlgoStdin, "%i %i %f\n", equalizedSample.sampleIndex, 0, equalizedSample.sample);
 
     //  low pass filter
     //      convolution with a raised cos filter would probably do fine
-    filterInputBuffer.n = sample->sampleIndex;
-    filterInputBuffer.sampleRate = sample->sampleRate;
+    filterInputBuffer.n = equalizedSample.sampleIndex;
+    filterInputBuffer.sampleRate = equalizedSample.sampleRate;
     filterInputBuffer.phase = 0;
     filterInputBuffer.buffer[filterInputBuffer.insertionIndex] = IQsample;
     sample_complex_t filteredIQsample;
 
     // filter the IQ samples
-    buffered_data_return_t returnValue = raisedCosFilter(&filterInputBuffer, &filteredIQsample, QAMstate.carrierFrequency * 1, debugPlots);
+    returnValue = raisedCosFilter(&filterInputBuffer, &filteredIQsample, QAMstate.carrierFrequency * 1, debugPlots);
 
     filterInputBuffer.insertionIndex = (filterInputBuffer.insertionIndex + 1) % filterInputBuffer.length;
 
@@ -597,6 +841,8 @@ buffered_data_return_t demodulateQAM(const sample_double_t *sample, QAM_properti
                 filteredIQsample.sampleIndex / ((int)QAMstate.symbolPeriod * 4),
                 cimag(filteredIQsample.sample)
                 );
+    if(debugPlots.IQvsTimeEnabled)
+        fprintf(debugPlots.IQvstimeStdin, "%f %f\n", creal(filteredIQsample.sample), cimag(filteredIQsample.sample));
 
     // collect samples into a buffer
     timingSyncBuffer.buffer[timingSyncBuffer.insertionIndex] = filteredIQsample.sample;
@@ -606,6 +852,8 @@ buffered_data_return_t demodulateQAM(const sample_double_t *sample, QAM_properti
     returnValue = gardnerAlgorithm(&timingSyncBuffer, &roughSyncedIQsample, QAMstate.symbolPeriod, debugPlots);
 
     timingSyncBuffer.insertionIndex = (timingSyncBuffer.insertionIndex + 1) % timingSyncBuffer.length;
+
+
 
     if(returnValue != RETURNED_SAMPLE)
         return AWAITING_SAMPLES;
@@ -875,7 +1123,7 @@ int main(void)
     // This is the period of time all the orthogonal symbols will be integrated over
 #define SYMBOL_PERIOD 32
     // the OFDM channel number, how many cycles per symbol
-    int k = 4;
+    int k = 1;
     // buffer is the length of the symbol period, so that symbols are orthogonal
     double sampleBuffer[SYMBOL_PERIOD] = {0.0};
 
@@ -1073,7 +1321,15 @@ int main(void)
     debugPlots.eyeDiagramImaginaryStdin = popen(eyeDiagramPlotImaginary, "w");
 
     // using it to plot the time domain signal
-    debugPlots.IQvstimeStdin = popen(eyeDiagramPlotReal, "w");
+    char IQvstimeplot[300] = {0};
+    sprintf(
+        IQvstimeplot,
+        "feedgnuplot "
+        "--domain --lines --points "
+        "--title \"continuous IQ plot\" "
+        "--xlabel \"I\" --ylabel \"Q\" "
+        );
+    debugPlots.IQvstimeStdin = popen(IQvstimeplot, "w");
 
     if (debugPlots.IQvstimeStdin == NULL)
     {
@@ -1111,6 +1367,7 @@ int main(void)
         "--title \"QAM demodulation debug plot\" "
         "--xlabel \"Time (sample index)\" --ylabel \"value\" "
         "--legend 0 \"Original audio samples\" "
+        "--legend 1 \"Equalized audio samples\" "
         "--legend 5 \"I\" "
         "--legend 6 \"Q\" "
         "--legend 7 \"Phase error signal\" "
@@ -1132,6 +1389,7 @@ int main(void)
         "--legend 5 \"I\" "
         "--legend 6 \"Q\" "
         "--legend 7 \"Phase error signal\" "
+        "--legend 21 \"Phase error signal\" "
         "--legend 8 \"Post Ideal I\" "
         "--legend 9 \"Post Ideal Q\" "
         "--legend 10 \"Pre ideal I\" "
@@ -1154,19 +1412,45 @@ int main(void)
         goto exit;
     }
 
+    char *channelFilterPlot =
+        "feedgnuplot "
+        "--domain --dataid --lines --points "
+        "--title \"channel filter debug plot\" "
+        "--xlabel \"sample #\" --ylabel \"Value\" "
+        "--legend 0 \"input samples\" "
+        "--legend 1 \"impulse Response\" "
+        "--legend 2 \"convolution test\" "
+        "--legend 3 \"frequency response magnitude\" "
+        "--legend 4 \"frequency response phase\" "
+        "--legend 5 \"reciprocal frequency response magnitude\" "
+        "--legend 6 \"reciprocal frequency response phase\" "
+        "--legend 7 \"inverse impulse response magnitude\" "
+        "--legend 8 \"inverse impulse response phase\" "
+    ;
+    debugPlots.channelFilterStdin = popen(channelFilterPlot, "w");
+    if(debugPlots.channelFilterStdin == NULL)
+    {
+        fprintf(stderr, "Failed to create channel filter plot: %s\n", strerror(errno));
+        retval = 11;
+        goto exit;
+    }
+
     debugPlots.flags = 0;   // reset all the flags
 
     // set some debug flags
     //debugPlots.waveformEnabled = 1;
     //debugPlots.QAMdecoderEnabled = 1;
     //debugPlots.filterDebugEnabled = 1;
-    debugPlots.gardnerAlgoEnabled = 1;
-    debugPlots.eyeDiagramRealEnabled = 1;
-    debugPlots.eyeDiagramImaginaryEnabled = 1;
+    //debugPlots.gardnerAlgoEnabled = 1;
+    //debugPlots.eyeDiagramRealEnabled = 1;
+    //debugPlots.eyeDiagramImaginaryEnabled = 1;
+    //debugPlots.IQplotEnabled = 1;   // only ideal sample times
+    //debugPlots.IQvsTimeEnabled = 1; // all sample times
+    debugPlots.channelFilterEnabled = 1;
 
 
     // while there is data to recieve, not end of file -> right now just a fixed number of 2000
-    for(int audioSampleIndex = 0; audioSampleIndex < SYMBOL_PERIOD * 600; audioSampleIndex++)
+    for(int audioSampleIndex = 0; audioSampleIndex < SYMBOL_PERIOD * 2000; audioSampleIndex++)
     {
         // recieve data on stdin, signed 32bit integer
         for(size_t i = 0; i < sizeof(sampleConvert.value); i++)
@@ -1187,8 +1471,9 @@ int main(void)
         QAM_properties_t QAMstate;
         QAMstate.carrierFrequency = (double)sample.sampleRate / SYMBOL_PERIOD;
         QAMstate.carrierPhase = 0;
-        QAMstate.k = 1;
-        QAMstate.symbolPeriod = (int)(sample.sampleRate / QAMstate.carrierFrequency);
+        QAMstate.k = k;
+        //QAMstate.symbolPeriod = (int)(sample.sampleRate / QAMstate.carrierFrequency);
+        QAMstate.symbolPeriod = SYMBOL_PERIOD;
         demodulateQAM(&sample, QAMstate, debugPlots);
 
 
@@ -1253,6 +1538,11 @@ exit:
     if((debugPlots.gardnerAlgoStdin != NULL) && (fork() == 0))
     {
         pclose(debugPlots.gardnerAlgoStdin);
+        return 0;
+    }
+    if((debugPlots.channelFilterStdin != NULL) && (fork() == 0))
+    {
+        pclose(debugPlots.channelFilterStdin);
         return 0;
     }
 
