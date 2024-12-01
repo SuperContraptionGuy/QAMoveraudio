@@ -369,8 +369,8 @@ static double WARN_UNUSED calculateSample(int n, int sampleRate)
         return 1;
     return 0;
     */
-    return raisedCosQAM(n, sampleRate) * amplitudeScaler;
-    //return impulse(n % (int)(44100 * 0.13 * 1.5), 0).I;
+    //return raisedCosQAM(n, sampleRate) * amplitudeScaler;
+    return impulse(n % (int)(44100 * 0.13 * 1.5), 0).I;
     //return singleChannelODFM_noguard(n, sampleRate) * amplitudeScaler;
 }
 

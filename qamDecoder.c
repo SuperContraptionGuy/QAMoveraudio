@@ -243,7 +243,8 @@ buffered_data_return_t channelFilter(const circular_buffer_double_t *inputSample
     static double *filter = NULL;
     static circular_buffer_complex_t frequencyResponse = {0};
     static circular_buffer_complex_t reciprocalFrequencyResponse = {0};
-    static circular_buffer_complex_t  inverseImpulseResponse = {0};
+    static circular_buffer_complex_t inverseImpulseResponse = {0};
+    static circular_buffer_double_t  channelSimulationBuffer = {0};
 
     static int initialized = 0; // have we generated the filter taps
     static int bufferPrimed = 0;    // have we waited for enough samples to start filtering
@@ -276,7 +277,13 @@ buffered_data_return_t channelFilter(const circular_buffer_double_t *inputSample
 
             impulseResponse->buffer[i] = (double)readSample.value / INT32_MAX;    // convert to a double between -1 and 1
             //impulseResponse->buffer[i] = cos(2*M_PI * 100 * (double)i / impulseResponse->length) + cos(2*M_PI * 2 * (double)i / impulseResponse->length);
-            //impulseResponse->buffer[i] = 0;
+            //impulseResponse->buffer[i] = cos(2*M_PI * 100 * (double)i / impulseResponse->length);
+            //impulseResponse->buffer[i] = exp((double)-i/100);
+            //impulseResponse->buffer[i] = exp(-pow((double)i/100 - 5, 2));
+            impulseResponse->buffer[i] = 0;
+            if(i % (impulseResponse->length/10) == 0)
+            //if(i == 0)
+                impulseResponse->buffer[i] = 1;
             //impulseResponse->insertionIndex++;
         }
         close(impulseResponseFile);
@@ -293,25 +300,38 @@ buffered_data_return_t channelFilter(const circular_buffer_double_t *inputSample
         if((inverseImpulseResponse.buffer = calloc(inverseImpulseResponse.length, sizeof(double complex))) == NULL)
             fprintf(stderr, "Couldn't allocate memory for inverse impulse response buffer: %s\n", strerror(errno));
 
+        channelSimulationBuffer.length = impulseResponse->length;
+        if((channelSimulationBuffer.buffer = calloc(channelSimulationBuffer.length, sizeof(double))) == NULL)
+            fprintf(stderr, "Couldn't allocate memory for channel simulation buffer: %s\n", strerror(errno));
+
+
         int N = frequencyResponse.length;
         for(int k = 0; k < N; k++)
         {
             for(int x =  0; x < N; x++)
             {
                 // dft
-                frequencyResponse.buffer[k] += cexp(I*2*M_PI * x/N * k) * impulseResponse->buffer[x];
+                frequencyResponse.buffer[k] += cexp(-I*2*M_PI * x/N * k) * impulseResponse->buffer[x];
             }
             //  take the reciprical
             reciprocalFrequencyResponse.buffer[k] = 1. / frequencyResponse.buffer[k];
+            // filter out the high frequencies? or set max value for the gain of any frequency
+            //reciprocalFrequencyResponse.buffer[k] = fmax(fmin(creal(reciprocalFrequencyResponse.buffer[k]), 30), -30) + I*fmax(fmin(cimag(reciprocalFrequencyResponse.buffer[k]), 30), -30);
+            // chop down the extreme values
+            //if(cabs(reciprocalFrequencyResponse.buffer[k]) > 20)
+                //reciprocalFrequencyResponse.buffer[k] = 0;
+
+            // chop off higher frequencies
+            //if(abs(k - reciprocalFrequencyResponse.length / 2) < reciprocalFrequencyResponse.length / 30)
+                //reciprocalFrequencyResponse.buffer[k] = 0;
+            //reciprocalFrequencyResponse.buffer[k] = frequencyResponse.buffer[k];
 
             //  reverse the fourier transform
             for(int x =  0; x < N; x++)
             {
-                // inverse dft (negative phase, and normalization factor below)
-                inverseImpulseResponse.buffer[k] += cexp(-I*2*M_PI * x/N * k) * reciprocalFrequencyResponse.buffer[x];
+                // inverse dft (negative phase, and normalization factor)
+                inverseImpulseResponse.buffer[x] += cexp(I*2*M_PI * x/N * k) * reciprocalFrequencyResponse.buffer[k] / N;
             }
-            // normalization factor for inverse dft
-            inverseImpulseResponse.buffer[k] /= (double)inverseImpulseResponse.length / 100;
         }
 
 
@@ -326,51 +346,87 @@ buffered_data_return_t channelFilter(const circular_buffer_double_t *inputSample
             );
         if(inputSamples->n < impulseResponse->length)
             //fprintf(debugPlots.channelFilterStdin, "%i %i %f %i %f %i %f %i %f %i %f %i %f %i %f\n",
-            fprintf(debugPlots.channelFilterStdin, "%i %i %f %i %f\n",
+            fprintf(debugPlots.channelFilterStdin, "%i %i %f %i %f %i %f %i %f %i %f %i %f\n",
+            //fprintf(debugPlots.channelFilterStdin, "%i %i %f %i %f\n",
                     inputSamples->n,
-                    1, impulseResponse->buffer[inputSamples->n % impulseResponse->length],
-                    //3, cabs(frequencyResponse.buffer[(inputSamples->n + frequencyResponse.length / 2) % frequencyResponse.length]),
-                    //4, carg(frequencyResponse.buffer[(inputSamples->n + frequencyResponse.length / 2) % frequencyResponse.length]),
-                    //5, cabs(reciprocalFrequencyResponse.buffer[(inputSamples->n + reciprocalFrequencyResponse.length / 2) % reciprocalFrequencyResponse.length]),
-                    //6, carg(reciprocalFrequencyResponse.buffer[(inputSamples->n + reciprocalFrequencyResponse.length / 2) % reciprocalFrequencyResponse.length]),
-                    7, creal(inverseImpulseResponse.buffer[(inputSamples->n + inverseImpulseResponse.length / 2) % inverseImpulseResponse.length])
-                    //8, carg(inverseImpulseResponse.buffer[(inputSamples->n + inverseImpulseResponse.length / 2) % inverseImpulseResponse.length])
+                    1, -3 + impulseResponse->buffer[inputSamples->n % impulseResponse->length],
+                    3, 13 + cabs(frequencyResponse.buffer[(inputSamples->n + frequencyResponse.length / 2) % frequencyResponse.length]),
+                    4, 7 + carg(frequencyResponse.buffer[(inputSamples->n + frequencyResponse.length / 2) % frequencyResponse.length]),
+                    5, 13 + cabs(reciprocalFrequencyResponse.buffer[(inputSamples->n + reciprocalFrequencyResponse.length / 2) % reciprocalFrequencyResponse.length]),
+                    6, 7 + carg(reciprocalFrequencyResponse.buffer[(inputSamples->n + reciprocalFrequencyResponse.length / 2) % reciprocalFrequencyResponse.length]),
+                    //7, creal(inverseImpulseResponse.buffer[(inputSamples->n + inverseImpulseResponse.length / 2) % inverseImpulseResponse.length]),
+                    //8, cimag(inverseImpulseResponse.buffer[(inputSamples->n + inverseImpulseResponse.length / 2) % inverseImpulseResponse.length])
+                    //3, cabs(frequencyResponse.buffer[inputSamples->n % frequencyResponse.length]),
+                    //4, carg(frequencyResponse.buffer[inputSamples->n % frequencyResponse.length]),
+                    //5, cabs(reciprocalFrequencyResponse.buffer[inputSamples->n % reciprocalFrequencyResponse.length]),
+                    //6, carg(reciprocalFrequencyResponse.buffer[inputSamples->n % reciprocalFrequencyResponse.length]),
+                    7, -12 + creal(inverseImpulseResponse.buffer[inputSamples->n % inverseImpulseResponse.length])
+                    //8, cimag(inverseImpulseResponse.buffer[inputSamples->n % inverseImpulseResponse.length])
                 );
     }
 
     // wait for enough samples to come in to do the first convolution
     // I don't have to wait, I'm pulling in past samples, and before the first sample, they can be zeros
     // at least for the test where I convolve the impulse response with the input
-    if(!bufferPrimed)
-    {
-        //if(inputSamples->n < impulseResponse->length - 1)
-        if(inputSamples->n < 25)
-        //if(0)
-            return AWAITING_SAMPLES;
-        bufferPrimed = 1;
-    }
+
+    //if(inputSamples->n < impulseResponse->length - 1)
+    //if(inputSamples->n < 0)
+        //return AWAITING_SAMPLES;
 
     // just do a test, let's take the impulse response and convolve it with the input samples to simulate the channel
-    outputSample->sample = 0;
+    channelSimulationBuffer.buffer[channelSimulationBuffer.insertionIndex] = 0;
+    //outputSample->sample = 0;
     for(int i = 0; i < impulseResponse->length; i++)
     {
         // multiply the filter by the input samples at respective times and sum the results
+        // index, start at most recent input sample and move backwards in time
         int inputIndex = (inputSamples->insertionIndex - i) % inputSamples->length;
         if(inputIndex < 0)
             inputIndex += inputSamples->length;
         int filterIndex = i;
 
-        outputSample->sample += inputSamples->buffer[inputIndex] * impulseResponse->buffer[filterIndex] * -inverseImpulseResponse.buffer[filterIndex];
+        //outputSample->sample += inputSamples->buffer[inputIndex] * impulseResponse->buffer[filterIndex] * -inverseImpulseResponse.buffer[filterIndex];
+        //outputSample->sample += inputSamples->buffer[inputIndex] * impulseResponse->buffer[filterIndex];
+        channelSimulationBuffer.buffer[channelSimulationBuffer.insertionIndex] += inputSamples->buffer[inputIndex] * impulseResponse->buffer[filterIndex];
+        //outputSample->sample += inputSamples->buffer[inputIndex] * inverseImpulseResponse.buffer[filterIndex];
     }
+    channelSimulationBuffer.n = inputSamples->n;
+    channelSimulationBuffer.sampleRate = inputSamples->sampleRate;
+
+    // increment channel sim buffer index now that we're done accessing it
+    channelSimulationBuffer.insertionIndex = (channelSimulationBuffer.insertionIndex + 1) % channelSimulationBuffer.length;
 
     // now reverse the channel by convolving the inverse filter
+
+    // wait for enough sampls to begin convolution
+    if(channelSimulationBuffer.n < channelSimulationBuffer.length - 1)
+        return AWAITING_SAMPLES;
+    // apply inverse filter
+    outputSample->sample = 0;
+    for(int i = 0; i < channelSimulationBuffer.length; i++)
+    {
+        // index, start at oldest sample, and move forward in time up to most recent
+        //int inputIndex = (channelSimulationBuffer.insertionIndex + 1 + i) % channelSimulationBuffer.length;
+        // start at newest sample and move backwards in time to oldest sample
+        int inputIndex = (channelSimulationBuffer.insertionIndex  - 1- i) % channelSimulationBuffer.length;
+        if(inputIndex < 0)
+            inputIndex += channelSimulationBuffer.length;
+        // reverse the filter direction, start at filter end, and work to beginning
+        //int filterIndex = inverseImpulseResponse.length - 1 - i;
+        int filterIndex = i;
+
+        outputSample->sample += channelSimulationBuffer.buffer[inputIndex] * creal(inverseImpulseResponse.buffer[filterIndex]);
+        //outputSample->sample += channelSimulationBuffer.buffer[i];
+    }
+    //outputSample->sample = channelSimulationBuffer.buffer[channelSimulationBuffer.insertionIndex+1];
+    outputSample->sampleIndex = channelSimulationBuffer.n - channelSimulationBuffer.length;
+    outputSample->sampleRate = channelSimulationBuffer.sampleRate;
 
 
 
     //outputSample->sampleIndex = inputSamples->n - impulseResponse->length;
     //outputSample->sampleIndex = inputSamples->n;
-    outputSample->sampleIndex = inputSamples->n - 25;
-    outputSample->sampleRate = inputSamples->sampleRate;
+    //outputSample->sampleIndex = inputSamples->n - 0;
 
     // test, bypass
     //outputSample->sample = inputSamples->buffer[inputSamples->insertionIndex];
@@ -378,9 +434,11 @@ buffered_data_return_t channelFilter(const circular_buffer_double_t *inputSample
 
     if(debugPlots.channelFilterEnabled)
     {
-        fprintf(debugPlots.channelFilterStdin, "%i %i %f\n",
+        fprintf(debugPlots.channelFilterStdin, "%i %i %f %i %f\n",
                 outputSample->sampleIndex,
-                2, outputSample->sample
+                //inputSamples->n,
+                2, -6 + channelSimulationBuffer.buffer[channelSimulationBuffer.insertionIndex],
+                9, -18 + outputSample->sample
             );
 
     }
@@ -1419,7 +1477,8 @@ int main(void)
         "--xlabel \"sample #\" --ylabel \"Value\" "
         "--legend 0 \"input samples\" "
         "--legend 1 \"impulse Response\" "
-        "--legend 2 \"convolution test\" "
+        "--legend 2 \"channel simulation\" "
+        "--legend 9 \"channel correction\" "
         "--legend 3 \"frequency response magnitude\" "
         "--legend 4 \"frequency response phase\" "
         "--legend 5 \"reciprocal frequency response magnitude\" "
