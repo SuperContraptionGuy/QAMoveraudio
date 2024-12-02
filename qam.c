@@ -10,6 +10,8 @@
 #include <errno.h>
 #include <time.h>
 
+#include <complex.h>
+
 #define WARN_UNUSED __attribute__((warn_unused_result))
 
 #define DEBUG_LEVEL 1
@@ -48,11 +50,75 @@ typedef struct __attribute__((packed))
 } riff_header_t;
 
 
+// this is a bit lame. should use complex datatype
 typedef struct
 {
-    double I;
-    double Q;
+    double InPhase;
+    double Quadrature;
 } iqsample_t;
+
+typedef struct __attribute__((packed))
+{
+    union
+    {
+        int32_t value;
+        uint8_t bytes[sizeof(int32_t)];
+    };
+} int32_to_bytes_t;
+
+typedef struct
+{
+    int sampleRate;
+    int channels;
+
+    // carrier frequenncy?
+    int baseband;   // if set to 1, IQ sampels are taken as real so OFDM symbols can be transmitted at baseband. Halves the number of channels. to even channels only
+
+    int guardPeriod;
+    int symbolPeriod;   // includes guard period and ODFM period
+    int ofdmPeriod;     // just the OFDM symbol itslef
+
+    int initialized;
+
+    FILE* dataInput;    // pipe to read data from that will be sent of the channel
+
+    // array length of channels representing the current entire OFDM symbol
+    double complex *currentOFDMSymbol;
+
+
+    struct
+    {
+        int long frameStart;
+        int fieldIndex;     // index of the field within the frame
+        enum
+        {
+            IDLE,
+            ACTIVE,
+        } frame;    // a series of fields
+
+        int long fieldStart;
+        int symbolIndex;    // index of the symbol within the field
+        enum
+        {
+            // Active field types
+            PREAMBLE,   // for frame detection and timing synchronization 
+            DATA,       // data field, also contains pilot symbols interspersed
+
+        } field;    // a series of OFDM symbols
+
+        int long symbolStart;
+        enum
+        {
+            // all otehr symbol states
+            GUARD_PERIOD,   // cyclic prefix for obsorbing channel effects (ISI)
+            OFDM_PERIOD,  // transmission of the actual OFDM symbol information
+            
+
+        } symbol;   // an atomic OFDM symbol
+
+
+    } state;
+} OFDM_state_t;
 
 
 // some functions to generate IQ streams with different properties
@@ -60,7 +126,7 @@ iqsample_t impulse(int symbolIndex, int impulseTime)
 {
     iqsample_t sample = {0, 0};
     if(symbolIndex == impulseTime)
-        sample.I = 1;
+        sample.InPhase = 1;
     return sample;
 }
 
@@ -83,8 +149,8 @@ iqsample_t randomQAM(int square)
     // square is the number of states of I and of Q, total states is square squared
     // I and Q values returned between -1 and 1
     iqsample_t sample = {0, 0};
-    sample.I = (double)(rand() % square) / (square - 1) * 2 - 1;
-    sample.Q = (double)(rand() % square) / (square - 1) * 2 - 1;
+    sample.InPhase = (double)(rand() % square) / (square - 1) * 2 - 1;
+    sample.Quadrature = (double)(rand() % square) / (square - 1) * 2 - 1;
     return sample;
 }
 
@@ -108,8 +174,8 @@ iqsample_t sequentialIQ(int symbolIndex, int square)
 {
     iqsample_t symbol;
     // sequentially hit all the IQ values in order in the constelation defined by power
-    symbol.I = (double)(symbolIndex % square) / (square - 1) * 2 - 1;
-    symbol.Q = (double)(symbolIndex / square % square) / (square - 1) * 2 - 1;
+    symbol.InPhase = (double)(symbolIndex % square) / (square - 1) * 2 - 1;
+    symbol.Quadrature = (double)(symbolIndex / square % square) / (square - 1) * 2 - 1;
     return symbol;
 }
 
@@ -243,7 +309,7 @@ double raisedCosQAM(int n, int sampleRate)
         IQdata[IQindex] = randomQAM_withPreamble(symbolIndex + filterLengthSymbols / 2, 2);
         IQindex = IQsampleIndex;
     #if DEBUG_LEVEL > 0
-        fprintf(plotStdIn, "%i %i %f %i %f\n", originalN, 6, IQdata[IQsampleIndex].I, 7, IQdata[IQsampleIndex].Q);
+        fprintf(plotStdIn, "%i %i %f %i %f\n", originalN, 6, IQdata[IQsampleIndex].InPhase, 7, IQdata[IQsampleIndex].Quadrature);
         fprintf(plotStdIn, "%i %i %i\n", originalN, 8, IQindex);
     #endif
     }
@@ -258,8 +324,8 @@ double raisedCosQAM(int n, int sampleRate)
         int IQIndex = (IQsampleIndex + i - filterLengthSymbols / 2) % filterLengthSymbols;
         if(IQIndex < 0)
             IQIndex = filterLengthSymbols + IQIndex;    // make sure index is positive and wraps backwards
-        filteredIQsample.I += filter[filterIndex] * IQdata[IQIndex].I;
-        filteredIQsample.Q += filter[filterIndex] * IQdata[IQIndex].Q;
+        filteredIQsample.InPhase += filter[filterIndex] * IQdata[IQIndex].InPhase;
+        filteredIQsample.Quadrature += filter[filterIndex] * IQdata[IQIndex].Quadrature;
         //filteredIQsample.I += filter[filterIndex];
         //filteredIQsample.I = IQdata[IQIndex].I;
         //filteredIQsample.I += IQdata[IQIndex].I / filterLengthSymbols;
@@ -270,8 +336,8 @@ double raisedCosQAM(int n, int sampleRate)
     // normalization for raised cos filter, prob not correct
     //filteredIQsample.I /= 2;
     //filteredIQsample.Q /= 2;
-    filteredIQsample.I *= M_SQRT1_2;    // normalization factor for QAM constellation with max I and Q of 1, converts to max magnitude of 1
-    filteredIQsample.Q *= M_SQRT1_2;
+    filteredIQsample.InPhase *= M_SQRT1_2;    // normalization factor for QAM constellation with max I and Q of 1, converts to max magnitude of 1
+    filteredIQsample.Quadrature *= M_SQRT1_2;
 
     //return filter[symbolIndex%filterLengthSymbols*symbolPeriod+sampleIndex];
     //return IQdata[(IQsampleIndex + n%filterLengthSymbols - filterLengthSymbols / 2) %filterLengthSymbols].I;
@@ -289,19 +355,237 @@ double raisedCosQAM(int n, int sampleRate)
 
     double audioSample =
     (
-        (filteredIQsample.I) * cos(2.0 * M_PI * sampleIndex * k / symbolPeriod) +
-        (filteredIQsample.Q) * sin(2.0 * M_PI * sampleIndex * k / symbolPeriod)
+        (filteredIQsample.InPhase) * cos(2.0 * M_PI * sampleIndex * k / symbolPeriod) +
+        (filteredIQsample.Quadrature) * sin(2.0 * M_PI * sampleIndex * k / symbolPeriod)
     ) / 2.0;    // normalization factor for sum of sin+cos of amp 1 not exceeding 1
 #if DEBUG_LEVEL > 0
     fprintf(plotStdIn, "%i %i %i %i %i %i %f %i %i\n", originalN, 0, symbolIndex, 1, sampleIndex, 2, audioSample, 3, phaseOffset);
-    fprintf(plotStdIn, "%i %i %f %i %f\n", originalN, 4, filteredIQsample.I, 5, filteredIQsample.Q);
+    fprintf(plotStdIn, "%i %i %f %i %f\n", originalN, 4, filteredIQsample.InPhase, 5, filteredIQsample.Quadrature);
 #endif
 
    return audioSample;
 
 }
 
-// really this is generating a single OFDM channel without guard periods
+// generate IQ samples corrisponding to one OFDM symbol for baseband transmission (real samples valued only)
+double OFDMsymbolBaseband(int n, OFDM_state_t *OFDMstate)
+{
+    // take the inverse transform of the current OFDM symbol values at the current offset n
+    double sample = 0;
+    for(int k = 0; k < OFDMstate->channels; k++)
+    {
+        // add together effectively a cos and sin scaled by the symbol amplitudes at each frequency (channel)
+        sample += creal(OFDMstate->currentOFDMSymbol[k] * cexp(I*2*M_PI * k * n / OFDMstate->ofdmPeriod));
+    }
+    sample /= OFDMstate->channels;  // normalization constant
+
+    return sample;
+}
+
+// runs the state machine for an OFDM based communication transmitter
+double OFDM(int long n, OFDM_state_t *OFDMstate)
+{
+    if(OFDMstate->initialized == 0)
+    {
+        // initialize the state variables
+        OFDMstate->state.frame = IDLE;
+        OFDMstate->state.frameStart = n;
+
+        OFDMstate->sampleRate = 44100;
+        //OFDMstate->guardPeriod = 0.13 * OFDMstate->sampleRate;  // measured impulse response of room lasts like a bit over a tenth of a second would be nice to have this adjusted on the fly
+        OFDMstate->guardPeriod = 1<<12;  // 2^12=1024 closest power of 2 to the impulse response length, slightly shorter
+        //OFDMstate->guardPeriod = 128;   // faster testing
+        //OFDMstate->guardPeriod = 0.001 * OFDMstate->sampleRate;  // measured impulse response of room lasts like a bit over a tenth of a second would be nice to have this adjusted on the fly
+        OFDMstate->ofdmPeriod = OFDMstate->guardPeriod * 4;   // dunno what the best OFDM period is compared to the guard period. I assume longer is better for channel efficiency, but maybe it's worse for noise? don't know
+        //OFDMstate->ofdmPeriod = OFDMstate->guardPeriod * 8;   // dunno what the best OFDM period is compared to the guard period. I assume longer is better for channel efficiency, but maybe it's worse for noise? don't know
+        OFDMstate->symbolPeriod = OFDMstate->guardPeriod + OFDMstate->ofdmPeriod;
+        OFDMstate->channels = OFDMstate->ofdmPeriod / 2;  // half due to using real symbols (ie, not modulating to higher frequency carrier wave but staying in baseband)
+
+        // initialize current symbol array
+        OFDMstate->currentOFDMSymbol = calloc(OFDMstate->channels, sizeof(double complex));
+        if(OFDMstate->currentOFDMSymbol == NULL)
+            fprintf(stderr, "Couldn't allocate current OFDM symbol array");
+
+
+        OFDMstate->initialized = 1;
+    }
+
+    double output = 0;
+
+    switch(OFDMstate->state.frame)
+    {
+        case IDLE:
+
+            // send nothing
+            output = 0;
+
+            // check for exit from IDLE frame
+            if(n - OFDMstate->state.frameStart >= OFDMstate->symbolPeriod * 1 - 1) // example of state change based on timing
+            {
+                OFDMstate->state.frame = ACTIVE;
+                OFDMstate->state.frameStart = n + 1;    // starts next index
+                OFDMstate->state.fieldIndex = 0;
+                OFDMstate->state.field = PREAMBLE;
+                OFDMstate->state.fieldStart = n + 1;
+                OFDMstate->state.symbol = GUARD_PERIOD;
+                OFDMstate->state.symbolStart = n + 1;
+                OFDMstate->state.symbolIndex = 0;
+            }
+            break;
+
+        case ACTIVE:
+            switch(OFDMstate->state.field)
+            {
+                case PREAMBLE:
+
+                    output = 0.70; // testing only
+
+                    switch(OFDMstate->state.symbol)
+                    {
+                        case GUARD_PERIOD:
+
+                            if(n - OFDMstate->state.symbolStart == 0)
+                            {
+                                // set new symbol for testing
+                                // generate a symetric symbol, with even frequency components only for syncronization
+                                for(int k = 0; k < OFDMstate->channels; k++)
+                                {
+                                    if(OFDMstate->state.symbolIndex == 0)
+                                    {
+                                        if(k % 2 == 0)
+                                        //if(k > 16 && k < 24 && k % 2 == 0)
+                                        //if(k == OFDMstate->channels / 16)
+                                        {
+                                            OFDMstate->currentOFDMSymbol[k] = 
+                                                rand() % 2 * 2 - 1 +
+                                                I*(rand() % 2 * 2 - 1);
+                                            //OFDMstate->currentOFDMSymbol[k] = I;    // testing
+                                        } else {
+                                            OFDMstate->currentOFDMSymbol[k] = 0;
+                                        }
+                                    } else if(OFDMstate->state.symbolIndex == 1)
+                                    {
+                                        OFDMstate->currentOFDMSymbol[k] = 
+                                            rand() % 2 * 2 - 1 +
+                                            I*(rand() % 2 * 2 - 1);
+                                        //OFDMstate->currentOFDMSymbol[k] = 0;    // testing
+                                    }
+                                }
+                            }
+
+                            output = OFDMsymbolBaseband(OFDMstate->ofdmPeriod - OFDMstate->guardPeriod + (n - OFDMstate->state.symbolStart),
+                                                        OFDMstate);
+
+                            if(OFDMstate->state.symbolIndex == 0)
+                                output *= M_SQRT2;  // scale factor for even only channels
+                            //output = output * 0.5;
+
+                            // check for exit form GUARD_PERIOD symbol
+                            if(n - OFDMstate->state.symbolStart >= OFDMstate->guardPeriod - 1)
+                            {
+                                OFDMstate->state.symbol = OFDM_PERIOD;
+                                OFDMstate->state.symbolStart = n + 1;
+                            }
+                            break;
+                        case OFDM_PERIOD:
+
+                            output = OFDMsymbolBaseband(n - OFDMstate->state.symbolStart,
+                                                        OFDMstate);
+                            if(OFDMstate->state.symbolIndex == 0)
+                                output *= M_SQRT2;
+                            //output = output;
+
+                            // check for exit
+                            if(n - OFDMstate->state.symbolStart >= OFDMstate->ofdmPeriod - 1)
+                            {
+                                OFDMstate->state.symbol = GUARD_PERIOD;
+                                OFDMstate->state.symbolStart = n + 1;
+                                OFDMstate->state.symbolIndex++;
+                            }
+                            break;
+                    }
+
+                    // check for exit from PREAMBLE field
+                    if(n - OFDMstate->state.fieldStart >= OFDMstate->symbolPeriod * 2 - 1)   // for 2 symbol preamble
+                    {
+                        OFDMstate->state.field = DATA;
+                        OFDMstate->state.fieldStart = n + 1;
+                        OFDMstate->state.symbolIndex = 0;
+                    }
+                    break;
+                case DATA:
+
+                    output = 1; // testing only
+
+                    switch(OFDMstate->state.symbol)
+                    {
+                        case GUARD_PERIOD:
+
+                            if(n - OFDMstate->state.symbolStart == 0)
+                            {
+                                // set new symbol for testing
+                                for(int k = 0; k < OFDMstate->channels; k++)
+                                {
+                                    if(k < OFDMstate->channels)
+                                    {
+                                        OFDMstate->currentOFDMSymbol[k] = 
+                                            rand() % 2 * 2 - 1 +
+                                            I*(rand() % 2 * 2 - 1);   // QPSK
+                                        //OFDMstate->currentOFDMSymbol[k] = 
+                                            //(double)(rand() % 4) / 2 - 1; // 4 level
+                                            //rand() % 2 +
+                                            //I*(rand() % 2); // on off key
+                                        //OFDMstate->currentOFDMSymbol[k] = 
+                                            //rand() % 3 - 1; // zero sometimes
+
+                                    } else {
+                                        OFDMstate->currentOFDMSymbol[k] = 0;
+                                    }
+                                }
+                            }
+                            output = OFDMsymbolBaseband(OFDMstate->ofdmPeriod - OFDMstate->guardPeriod + (n - OFDMstate->state.symbolStart),
+                                                        OFDMstate);
+                            //output = output * 0.5;
+
+                            // check for exit
+                            if(n - OFDMstate->state.symbolStart >= OFDMstate->guardPeriod - 1)
+                            {
+                                OFDMstate->state.symbol = OFDM_PERIOD;
+                                OFDMstate->state.symbolStart = n + 1;
+                            }
+                            break;
+                        case OFDM_PERIOD:
+
+                            output = OFDMsymbolBaseband(n - OFDMstate->state.symbolStart,
+                                                        OFDMstate);
+                            //output = output;
+
+                            // check for exit
+                            if(n - OFDMstate->state.symbolStart >= OFDMstate->ofdmPeriod - 1)
+                            {
+                                OFDMstate->state.symbol = GUARD_PERIOD;
+                                OFDMstate->state.symbolStart = n + 1;
+                                OFDMstate->state.symbolIndex++;
+                            }
+                            break;
+                    }
+
+                    // check for exit from DATA field
+                    if(n - OFDMstate->state.fieldStart >= OFDMstate->symbolPeriod * 10 - 1) // set number of symbols of data for example
+                    {
+                        OFDMstate->state.frame = IDLE;
+                        OFDMstate->state.frameStart = n + 1;
+                    }
+                    break;
+            }
+            break;
+    }
+
+    return output;
+}
+
+// really this is generating a single OFDM channel without guard periods,
+// missing some critical infrustructure
 static double singleChannelODFM_noguard(int n, int sampleRate)
 {
     int symbolPeriod = 256;
@@ -351,8 +635,8 @@ static double singleChannelODFM_noguard(int n, int sampleRate)
     int symbolStep = n % totalPeriod - guardPeriod;   // should be guardPeriod -> symbolPeriod -> 0 -> symbolPeriod as n increases from 0 -> totalPeriod
     audioSample =
     (
-        (sample.I + randI) * cos(2.0 * M_PI * symbolStep * k / symbolPeriod) +
-        (sample.Q + randQ) * sin(2.0 * M_PI * symbolStep * k / symbolPeriod)
+        (sample.InPhase + randI) * cos(2.0 * M_PI * symbolStep * k / symbolPeriod) +
+        (sample.Quadrature + randQ) * sin(2.0 * M_PI * symbolStep * k / symbolPeriod)
     ) / 2.0 * sqrt(2.0) * totalAmplitude;
 
    return audioSample;
@@ -369,7 +653,9 @@ static double WARN_UNUSED calculateSample(int n, int sampleRate)
         return 1;
     return 0;
     */
-    return raisedCosQAM(n, sampleRate) * amplitudeScaler;
+    static OFDM_state_t OFDMstate = {0};
+    return OFDM(n, &OFDMstate);
+    //return raisedCosQAM(n, sampleRate) * amplitudeScaler;
     //return singleChannelODFM_noguard(n, sampleRate) * amplitudeScaler;
 }
 
@@ -449,16 +735,6 @@ exit:
     return 0;
 }
 
-typedef struct __attribute__((packed))
-{
-    union
-    {
-        int32_t value;
-        uint8_t bytes[sizeof(int32_t)];
-    };
-} int32_to_bytes_t;
-
-
 static int WARN_UNUSED generateSamplesAndOutput(char* filenameInput)
 {
     int retval = 0;
@@ -471,7 +747,7 @@ static int WARN_UNUSED generateSamplesAndOutput(char* filenameInput)
     // audio sample rate
     int sampleRate = 44100;
     // total number of samples to generate
-    long length = sampleRate * 1;
+    long length = sampleRate * 6.5;
     // the number of the current sample
     long n = 0;
 
