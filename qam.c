@@ -14,7 +14,7 @@
 
 #define WARN_UNUSED __attribute__((warn_unused_result))
 
-#define DEBUG_LEVEL 1
+#define DEBUG_LEVEL 0
 #if DEBUG_LEVEL >= 1
     FILE* hexdumpStdIn = NULL;
     FILE* plotStdIn = NULL;
@@ -656,6 +656,7 @@ static double WARN_UNUSED calculateSample(int n, int sampleRate)
     static OFDM_state_t OFDMstate = {0};
     return OFDM(n, &OFDMstate);
     //return raisedCosQAM(n, sampleRate) * amplitudeScaler;
+    //return impulse(n % (int)(44100 * 0.13 * 1.5), 0).I;
     //return singleChannelODFM_noguard(n, sampleRate) * amplitudeScaler;
 }
 
@@ -719,9 +720,11 @@ static int WARN_UNUSED writeHeader(int length, int fileDescriptor)
     }
 
 exit:
-    if (hexdumpInput != NULL)
+    if (hexdumpInput != NULL && fork() == 0)
     {
         pclose(hexdumpInput);
+        exit(0);
+        return 0;
     }
 #endif
 
@@ -947,10 +950,17 @@ exit:
     #endif
     }
 
-    #if DEBUG_LEVEL > 0
+#if DEBUG_LEVEL > 0
+    if(plotStdIn != NULL && fork() == 0)
+    {
+        // it's holding onto a reference to stdout, gotta close that off
+        //freopen("/dev/null", "w", stdout);
+        // nope, that wasn't it
         pclose(plotStdIn);
-    #endif
-
+        exit(0);
+        return 0;
+    }
+#endif
 
     return retval;
 }
