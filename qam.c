@@ -418,6 +418,8 @@ double OFDM(int long n, OFDM_state_t *OFDMstate)
 
             // send nothing
             output = 0;
+            
+            // wait for enough data in the pipe to generate a frame, or wait for enough time to pass to send a frame anyway.
 
             // check for exit from IDLE frame
             if(n - OFDMstate->state.frameStart >= OFDMstate->symbolPeriod * 1 - 1) // example of state change based on timing

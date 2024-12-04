@@ -45,6 +45,122 @@ typedef enum
     PHASE_LOCK,
 } timing_lock_t;
 
+
+typedef struct
+{
+    FILE* waveformPlotStdin;
+    FILE* fftDebuggerStdin;
+    FILE* errorPlotStdin;
+    FILE* IQplotStdin;
+    FILE* IQvstimeStdin;
+    FILE* eyeDiagramRealStdin;
+    FILE* eyeDiagramImaginaryStdin;
+    FILE* filterDebugStdin;
+    FILE* QAMdecoderStdin;
+    FILE* gardnerAlgoStdin;
+    FILE* OFDMtimingSyncStdin;
+    FILE* channelFilterStdin;
+    union
+    {
+        struct
+        {
+            unsigned int waveformEnabled            : 1;
+            unsigned int fftDebugEnabled            : 1;
+            unsigned int errorPlotEnabled           : 1;
+            unsigned int IQplotEnabled              : 1;
+            unsigned int IQvsTimeEnabled            : 1;
+            unsigned int eyeDiagramRealEnabled      : 1;
+            unsigned int eyeDiagramImaginaryEnabled : 1;
+            unsigned int filterDebugEnabled         : 1;
+            unsigned int QAMdecoderEnabled          : 1;
+            unsigned int gardnerAlgoEnabled         : 1;
+            unsigned int OFDMtimingSyncEnabled      : 1;
+            unsigned int channelFilterEnabled       : 1;
+        };
+            unsigned long int flags;
+    };
+} debugPlots_t;
+
+typedef struct
+{
+    double carrierFrequency;
+    double carrierPhase;            // probably not going to use in the end.
+    double complex IQsamplingTransform;         // used to transform the IQ samples to compensate for carrier phase and amplitude mismatches (ln(amp) + i*phase)
+    double k;  // number of carrier cycles per sample
+    double symbolPeriod;    // number of audio samples per symbol
+    double selectedIQsamples[4];    // the closest samples to ideal sample time and mid symbol sample time for gardner algorithm
+} QAM_properties_t;
+
+typedef struct
+{
+    double *buffer;        // a pointer to an array for storing samples
+    int length;             // the length of the buffer
+    int insertionIndex;     // the index where new data is inserted into the circular buffer
+    int phase;              // used for some functions choosing when to do periodic calculations with the buffer
+    int sampleRate;
+    int n;
+} circular_buffer_double_t;
+typedef struct
+{
+    double complex *buffer;// a pointer to an array for storing samples
+    int length;             // the length of the buffer
+    int insertionIndex;     // the index where new data is inserted into the circular buffer
+    int phase;              // used for some functions choosing when to do periodic calculations with the buffer
+    int sampleRate;
+    int n;                  // index of sample at insertionIndex
+} circular_buffer_complex_t;
+
+typedef struct
+{
+    int sampleRate;
+    int channels;
+
+    int baseband;   // if 1 than we're working with real samples, not complex
+
+    int guardPeriod;
+    int ofdmPeriod;
+    int symbolPeriod;   // sum of guard and ofdm periods
+
+    int initialized;
+
+    circular_buffer_double_t ofdmSymbolBuffer; // holds the last symbolperiod of samples
+
+    int simulateChannel;    // 0 don't simulate, 1 simulate
+    circular_buffer_double_t channelSimulationBuffer;   // holds samples to be used for simulating channel impulse response
+    circular_buffer_double_t channelImpulseResponse;    // holds the impulse response of the channel.
+
+    struct
+    {
+        int long frameStart;    // estimate of the begining of the current frame of given type
+        enum
+        {
+            SEARCHING,  // searching for the beginning of a frame, autocorrelation search
+            ACTIVE,     // found a frame, currently decoding it
+        } frame;
+
+        int long fieldStart;    // estimate of teh beginning of the current field of given type
+        enum
+        {
+            PREAMBLE,
+            DATA,
+        } field;
+
+        int long symbolStart;   // offset of the beginning of the current symbol state
+        enum
+        {
+            GUARD_PERIOD,
+            OFDM_PERIOD,
+        } symbol;
+    } state;
+
+} OFDM_properties_t;
+
+typedef enum
+{
+    RETURNED_SAMPLE,
+    AWAITING_SAMPLES,
+} buffered_data_return_t;
+
 // calculate the discrete fourier transform of an array of real values but only at frequency 'k' (k cycles per windowSize samples)
 //  debugFlag is to print the right debug info for different situations
 //  offset is the starting position of the window in the buffer
@@ -160,118 +276,7 @@ double complex dft(double* buffer,
     return IQ;
 }
 
-typedef struct
-{
-    FILE* waveformPlotStdin;
-    FILE* fftDebuggerStdin;
-    FILE* errorPlotStdin;
-    FILE* IQplotStdin;
-    FILE* IQvstimeStdin;
-    FILE* eyeDiagramRealStdin;
-    FILE* eyeDiagramImaginaryStdin;
-    FILE* filterDebugStdin;
-    FILE* QAMdecoderStdin;
-    FILE* gardnerAlgoStdin;
-    FILE* OFDMtimingSyncStdin;
-    FILE* channelFilterStdin;
-    union
-    {
-        struct
-        {
-            unsigned int waveformEnabled            : 1;
-            unsigned int fftDebugEnabled            : 1;
-            unsigned int errorPlotEnabled           : 1;
-            unsigned int IQplotEnabled              : 1;
-            unsigned int IQvsTimeEnabled            : 1;
-            unsigned int eyeDiagramRealEnabled      : 1;
-            unsigned int eyeDiagramImaginaryEnabled : 1;
-            unsigned int filterDebugEnabled         : 1;
-            unsigned int QAMdecoderEnabled          : 1;
-            unsigned int gardnerAlgoEnabled         : 1;
-            unsigned int OFDMtimingSyncEnabled      : 1;
-            unsigned int channelFilterEnabled       : 1;
-        };
-            unsigned long int flags;
-    };
-} debugPlots_t;
-
-typedef struct
-{
-    double carrierFrequency;
-    double carrierPhase;            // probably not going to use in the end.
-    double complex IQsamplingTransform;         // used to transform the IQ samples to compensate for carrier phase and amplitude mismatches (ln(amp) + i*phase)
-    double k;  // number of carrier cycles per sample
-    double symbolPeriod;    // number of audio samples per symbol
-    double selectedIQsamples[4];    // the closest samples to ideal sample time and mid symbol sample time for gardner algorithm
-} QAM_properties_t;
-
-typedef struct
-{
-    double *buffer;        // a pointer to an array for storing samples
-    int length;             // the length of the buffer
-    int insertionIndex;     // the index where new data is inserted into the circular buffer
-    int phase;              // used for some functions choosing when to do periodic calculations with the buffer
-    int sampleRate;
-    int n;
-} circular_buffer_double_t;
-typedef struct
-{
-    double complex *buffer;// a pointer to an array for storing samples
-    int length;             // the length of the buffer
-    int insertionIndex;     // the index where new data is inserted into the circular buffer
-    int phase;              // used for some functions choosing when to do periodic calculations with the buffer
-    int sampleRate;
-    int n;                  // index of sample at insertionIndex
-} circular_buffer_complex_t;
-
-typedef struct
-{
-    int sampleRate;
-    int channels;
-
-    int baseband;   // if 1 than we're working with real samples, not complex
-
-    int guardPeriod;
-    int ofdmPeriod;
-    int symbolPeriod;   // sum of guard and ofdm periods
-
-    int initialized;
-
-    circular_buffer_double_t ofdmSymbolBuffer; // holds the last symbolperiod of samples
-
-    struct
-    {
-        int long frameStart;    // estimate of the begining of the current frame of given type
-        enum
-        {
-            SEARCHING,  // searching for the beginning of a frame, autocorrelation search
-            ACTIVE,     // found a frame, currently decoding it
-        } frame;
-
-        int long fieldStart;    // estimate of teh beginning of the current field of given type
-        enum
-        {
-            PREAMBLE,
-            DATA,
-        } field;
-
-        int long symbolStart;   // offset of the beginning of the current symbol state
-        enum
-        {
-            GUARD_PERIOD,
-            OFDM_PERIOD,
-        } symbol;
-    } state;
-
-} OFDM_properties_t;
-
-typedef enum
-{
-    RETURNED_SAMPLE,
-    AWAITING_SAMPLES,
-} buffered_data_return_t;
-
-buffered_data_return_t channelFilter(const circular_buffer_double_t *inputSamples, sample_double_t *outputSample, circular_buffer_double_t *impulseResponse, debugPlots_t debugPlots)
+buffered_data_return_t channelFilter(const circular_buffer_double_t *inputSamples, sample_double_t *outputSample, circular_buffer_double_t *impulseResponse, int justSimulate, debugPlots_t debugPlots)
 {
     // generate the filter from the inpulseResonse of the channel, hopefully rarely, let's just say once for now?
     static double *filter = NULL;
@@ -314,57 +319,61 @@ buffered_data_return_t channelFilter(const circular_buffer_double_t *inputSample
             //impulseResponse->buffer[i] = cos(2*M_PI * 100 * (double)i / impulseResponse->length);
             //impulseResponse->buffer[i] = exp((double)-i/100);
             //impulseResponse->buffer[i] = exp(-pow((double)i/100 - 5, 2));
-            impulseResponse->buffer[i] = 0;
-            if(i % (impulseResponse->length/10) == 0)
+            //impulseResponse->buffer[i] = 0;
+            //if(i % (impulseResponse->length/10) == 0)
             //if(i == 0)
-                impulseResponse->buffer[i] = 1;
+                //impulseResponse->buffer[i] = 1;
             //impulseResponse->insertionIndex++;
         }
         close(impulseResponseFile);
-
-        //  fourier transform the impulseResponse
-
-        frequencyResponse.length = impulseResponse->length;
-        if((frequencyResponse.buffer = calloc(frequencyResponse.length, sizeof(double complex))) == NULL)
-            fprintf(stderr, "Couldn't allocate memory for frequency response buffer: %s\n", strerror(errno));
-        reciprocalFrequencyResponse.length = impulseResponse->length;
-        if((reciprocalFrequencyResponse.buffer = calloc(reciprocalFrequencyResponse.length, sizeof(double complex))) == NULL)
-            fprintf(stderr, "Couldn't allocate memory for reciprocal frequency response buffer: %s\n", strerror(errno));
-        inverseImpulseResponse.length = impulseResponse->length;
-        if((inverseImpulseResponse.buffer = calloc(inverseImpulseResponse.length, sizeof(double complex))) == NULL)
-            fprintf(stderr, "Couldn't allocate memory for inverse impulse response buffer: %s\n", strerror(errno));
 
         channelSimulationBuffer.length = impulseResponse->length;
         if((channelSimulationBuffer.buffer = calloc(channelSimulationBuffer.length, sizeof(double))) == NULL)
             fprintf(stderr, "Couldn't allocate memory for channel simulation buffer: %s\n", strerror(errno));
 
-
-        int N = frequencyResponse.length;
-        for(int k = 0; k < N; k++)
+        if(!justSimulate)
         {
-            for(int x =  0; x < N; x++)
-            {
-                // dft
-                frequencyResponse.buffer[k] += cexp(-I*2*M_PI * x/N * k) * impulseResponse->buffer[x];
-            }
-            //  take the reciprical
-            reciprocalFrequencyResponse.buffer[k] = 1. / frequencyResponse.buffer[k];
-            // filter out the high frequencies? or set max value for the gain of any frequency
-            //reciprocalFrequencyResponse.buffer[k] = fmax(fmin(creal(reciprocalFrequencyResponse.buffer[k]), 30), -30) + I*fmax(fmin(cimag(reciprocalFrequencyResponse.buffer[k]), 30), -30);
-            // chop down the extreme values
-            //if(cabs(reciprocalFrequencyResponse.buffer[k]) > 20)
-                //reciprocalFrequencyResponse.buffer[k] = 0;
+            //  fourier transform the impulseResponse
 
-            // chop off higher frequencies
-            //if(abs(k - reciprocalFrequencyResponse.length / 2) < reciprocalFrequencyResponse.length / 30)
-                //reciprocalFrequencyResponse.buffer[k] = 0;
-            //reciprocalFrequencyResponse.buffer[k] = frequencyResponse.buffer[k];
+            frequencyResponse.length = impulseResponse->length;
+            if((frequencyResponse.buffer = calloc(frequencyResponse.length, sizeof(double complex))) == NULL)
+                fprintf(stderr, "Couldn't allocate memory for frequency response buffer: %s\n", strerror(errno));
+            reciprocalFrequencyResponse.length = impulseResponse->length;
+            if((reciprocalFrequencyResponse.buffer = calloc(reciprocalFrequencyResponse.length, sizeof(double complex))) == NULL)
+                fprintf(stderr, "Couldn't allocate memory for reciprocal frequency response buffer: %s\n", strerror(errno));
+            inverseImpulseResponse.length = impulseResponse->length;
+            if((inverseImpulseResponse.buffer = calloc(inverseImpulseResponse.length, sizeof(double complex))) == NULL)
+                fprintf(stderr, "Couldn't allocate memory for inverse impulse response buffer: %s\n", strerror(errno));
 
-            //  reverse the fourier transform
-            for(int x =  0; x < N; x++)
+
+
+            int N = frequencyResponse.length;
+            for(int k = 0; k < N; k++)
             {
-                // inverse dft (negative phase, and normalization factor)
-                inverseImpulseResponse.buffer[x] += cexp(I*2*M_PI * x/N * k) * reciprocalFrequencyResponse.buffer[k] / N;
+                for(int x =  0; x < N; x++)
+                {
+                    // dft
+                    frequencyResponse.buffer[k] += cexp(-I*2*M_PI * x/N * k) * impulseResponse->buffer[x];
+                }
+                //  take the reciprical
+                reciprocalFrequencyResponse.buffer[k] = 1. / frequencyResponse.buffer[k];
+                // filter out the high frequencies? or set max value for the gain of any frequency
+                //reciprocalFrequencyResponse.buffer[k] = fmax(fmin(creal(reciprocalFrequencyResponse.buffer[k]), 30), -30) + I*fmax(fmin(cimag(reciprocalFrequencyResponse.buffer[k]), 30), -30);
+                // chop down the extreme values
+                //if(cabs(reciprocalFrequencyResponse.buffer[k]) > 20)
+                    //reciprocalFrequencyResponse.buffer[k] = 0;
+
+                // chop off higher frequencies
+                //if(abs(k - reciprocalFrequencyResponse.length / 2) < reciprocalFrequencyResponse.length / 30)
+                    //reciprocalFrequencyResponse.buffer[k] = 0;
+                //reciprocalFrequencyResponse.buffer[k] = frequencyResponse.buffer[k];
+
+                //  reverse the fourier transform
+                for(int x =  0; x < N; x++)
+                {
+                    // inverse dft (negative phase, and normalization factor)
+                    inverseImpulseResponse.buffer[x] += cexp(I*2*M_PI * x/N * k) * reciprocalFrequencyResponse.buffer[k] / N;
+                }
             }
         }
 
@@ -422,13 +431,22 @@ buffered_data_return_t channelFilter(const circular_buffer_double_t *inputSample
         //outputSample->sample += inputSamples->buffer[inputIndex] * impulseResponse->buffer[filterIndex] * -inverseImpulseResponse.buffer[filterIndex];
         //outputSample->sample += inputSamples->buffer[inputIndex] * impulseResponse->buffer[filterIndex];
         channelSimulationBuffer.buffer[channelSimulationBuffer.insertionIndex] += inputSamples->buffer[inputIndex] * impulseResponse->buffer[filterIndex];
+        outputSample->sample = channelSimulationBuffer.buffer[channelSimulationBuffer.insertionIndex];
         //outputSample->sample += inputSamples->buffer[inputIndex] * inverseImpulseResponse.buffer[filterIndex];
     }
     channelSimulationBuffer.n = inputSamples->n;
+    outputSample->sampleIndex = inputSamples->n;
     channelSimulationBuffer.sampleRate = inputSamples->sampleRate;
+    outputSample->sampleRate = inputSamples->sampleRate;
 
     // increment channel sim buffer index now that we're done accessing it
     channelSimulationBuffer.insertionIndex = (channelSimulationBuffer.insertionIndex + 1) % channelSimulationBuffer.length;
+
+    // if just simulating channel, return the output now
+    if(justSimulate)
+    {
+        return RETURNED_SAMPLE;
+    }
 
     // now reverse the channel by convolving the inverse filter
 
@@ -875,7 +893,7 @@ buffered_data_return_t demodulateQAM(const sample_double_t *sample, QAM_properti
     channelFilterBuffer.buffer[channelFilterBuffer.insertionIndex] = sample->sample;
     sample_double_t equalizedSample;
 
-    buffered_data_return_t returnValue = channelFilter(&channelFilterBuffer, &equalizedSample, &impulseResponse, debugPlots);
+    buffered_data_return_t returnValue = channelFilter(&channelFilterBuffer, &equalizedSample, &impulseResponse, 0, debugPlots);
 
     channelFilterBuffer.insertionIndex = (channelFilterBuffer.insertionIndex + 1) % channelFilterBuffer.length;
 
@@ -980,16 +998,60 @@ buffered_data_return_t demodualteOFDM( const sample_double_t *sample, OFDM_prope
         if(OFDMstate->ofdmSymbolBuffer.buffer == NULL)
             fprintf(stderr, "couldn't allocate ofdm symbol buffer.\n");
 
+        // initialize channel simulation buffer
+        OFDMstate->simulateChannel = 1;
+
+        if(OFDMstate->simulateChannel)
+        {
+            OFDMstate->channelSimulationBuffer.length = 5912;
+            OFDMstate->channelSimulationBuffer.insertionIndex = 0;
+            OFDMstate->channelSimulationBuffer.buffer = calloc(OFDMstate->channelSimulationBuffer.length, sizeof(double));
+            if(OFDMstate->channelSimulationBuffer.buffer == NULL)
+                fprintf(stderr, "cahnnelSimulationBuffer failed to allocate: %s\n", strerror(errno));
+
+            // initialize impulse response buffer
+            OFDMstate->channelImpulseResponse.length = 5912;
+            OFDMstate->channelImpulseResponse.insertionIndex = 0;
+            OFDMstate->channelImpulseResponse.buffer = calloc(OFDMstate->channelImpulseResponse.length, sizeof(double));
+            if(OFDMstate->channelImpulseResponse.buffer == NULL)
+                fprintf(stderr, "ImpulseResponse failed to allocate: %s\n", strerror(errno));
+        }
+
         // run once
         OFDMstate->initialized = 1;
     }
+
+    sample_double_t equalizedSample;
+    // decide whether to simulate the channel response or not
+    if(OFDMstate->simulateChannel)
+    {
+        // channel simulation filter
+        OFDMstate->channelSimulationBuffer.n = sample->sampleIndex;
+        OFDMstate->channelSimulationBuffer.sampleRate = sample->sampleRate;
+        OFDMstate->channelSimulationBuffer.phase = 0;
+        OFDMstate->channelSimulationBuffer.buffer[OFDMstate->channelSimulationBuffer.insertionIndex] = sample->sample;
+
+        buffered_data_return_t returnValue = channelFilter(&OFDMstate->channelSimulationBuffer, &equalizedSample, &OFDMstate->channelImpulseResponse, 1, debugPlots);
+
+        OFDMstate->channelSimulationBuffer.insertionIndex = (OFDMstate->channelSimulationBuffer.insertionIndex + 1) % OFDMstate->channelSimulationBuffer.length;
+
+        if(returnValue != RETURNED_SAMPLE)
+            return AWAITING_SAMPLES;
+
+    } else {
+        
+        // skip channel simulation
+        equalizedSample = *sample;
+    }
+
+
 
     // run the state machine
     switch(OFDMstate->state.frame)
     {
         case SEARCHING:
             // add sample to the ofdm symbol window buffer
-            OFDMstate->ofdmSymbolBuffer.buffer[OFDMstate->ofdmSymbolBuffer.insertionIndex] = sample->sample;
+            OFDMstate->ofdmSymbolBuffer.buffer[OFDMstate->ofdmSymbolBuffer.insertionIndex] = equalizedSample.sample;
 
             // run a correlation between the first half of the symbol in the buffer, and the second half
             double sum = 0;
@@ -1005,8 +1067,9 @@ buffered_data_return_t demodualteOFDM( const sample_double_t *sample, OFDM_prope
             // graph the correlation function
             if(debugPlots.OFDMtimingSyncEnabled)
             {
-                fprintf(debugPlots.OFDMtimingSyncStdin, "%i %i %f\n", sample->sampleIndex, 0, sum - 2);
-                fprintf(debugPlots.OFDMtimingSyncStdin, "%i %i %f\n", sample->sampleIndex, 1, sample->sample);
+                fprintf(debugPlots.OFDMtimingSyncStdin, "%i %i %f\n", equalizedSample.sampleIndex, 0, sum - 2);
+                fprintf(debugPlots.OFDMtimingSyncStdin, "%i %i %f\n", equalizedSample.sampleIndex, 1, equalizedSample.sample);
+                fprintf(debugPlots.OFDMtimingSyncStdin, "%i %i %f\n", sample->sampleIndex, 2, sample->sample);
             }
 
             // increment insertion indes
@@ -1320,6 +1383,8 @@ int main(void)
         "--title \"OFDM timing sync\" "
         "--xlabel \"sample number\" --ylabel \"value\" "
         "--legend 0 \"preamble auto correlation\" "
+        "--legend 1 \"Channel simulated samples\" "
+        "--legend 2 \"original samples\" "
     ;
     debugPlots.OFDMtimingSyncStdin = popen(OFDMtimingSyncPlot, "w");
     if(debugPlots.OFDMtimingSyncStdin == NULL)
