@@ -1377,6 +1377,30 @@ int main(void)
         goto exit;
     }
 
+    char *channelFilterPlot =
+        "feedgnuplot "
+        "--domain --dataid --lines --points "
+        "--title \"channel filter debug plot\" "
+        "--xlabel \"sample #\" --ylabel \"Value\" "
+        "--legend 0 \"input samples\" "
+        "--legend 1 \"impulse Response\" "
+        "--legend 2 \"channel simulation\" "
+        "--legend 9 \"channel correction\" "
+        "--legend 3 \"frequency response magnitude\" "
+        "--legend 4 \"frequency response phase\" "
+        "--legend 5 \"reciprocal frequency response magnitude\" "
+        "--legend 6 \"reciprocal frequency response phase\" "
+        "--legend 7 \"inverse impulse response magnitude\" "
+        "--legend 8 \"inverse impulse response phase\" "
+    ;
+    debugPlots.channelFilterStdin = popen(channelFilterPlot, "w");
+    if(debugPlots.channelFilterStdin == NULL)
+    {
+        fprintf(stderr, "Failed to create channel filter plot: %s\n", strerror(errno));
+        retval = 11;
+        goto exit;
+    }
+
     char *OFDMtimingSyncPlot =
         "feedgnuplot "
         "--domain --dataid --lines --points "
