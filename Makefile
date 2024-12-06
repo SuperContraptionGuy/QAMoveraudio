@@ -34,7 +34,8 @@ CFLAGS := \
 
 LDFLAGS := \
 	-Wl,-z,relro,-z,now \
-	-lm
+	-lm \
+	-lfftw3
 
 .PHONY: all qam qamDecoder clean
 all: qam qamDecoder
