@@ -666,10 +666,10 @@ buffered_data_return_t OFDM(int long n, sample_double_t *outputSample, OFDM_stat
 
         OFDMstate->sampleRate = 44100;
         //OFDMstate->guardPeriod = 0.13 * OFDMstate->sampleRate;  // measured impulse response of room lasts like a bit over a tenth of a second would be nice to have this adjusted on the fly
-        OFDMstate->guardPeriod = 1<<12;  // 2^12=1024 closest power of 2 to the impulse response length, slightly shorter
+        OFDMstate->guardPeriod = (1<<12) / 2;  // 2^12=1024 closest power of 2 to the impulse response length, slightly shorter
         //OFDMstate->guardPeriod = 128;   // faster testing
         //OFDMstate->guardPeriod = 0.001 * OFDMstate->sampleRate;  // measured impulse response of room lasts like a bit over a tenth of a second would be nice to have this adjusted on the fly
-        OFDMstate->ofdmPeriod = OFDMstate->guardPeriod * 4;   // dunno what the best OFDM period is compared to the guard period. I assume longer is better for channel efficiency, but maybe it's worse for noise? don't know
+        OFDMstate->ofdmPeriod = OFDMstate->guardPeriod * 8;   // dunno what the best OFDM period is compared to the guard period. I assume longer is better for channel efficiency, but maybe it's worse for noise? don't know
         //OFDMstate->ofdmPeriod = OFDMstate->guardPeriod * 8;   // dunno what the best OFDM period is compared to the guard period. I assume longer is better for channel efficiency, but maybe it's worse for noise? don't know
         OFDMstate->symbolPeriod = OFDMstate->guardPeriod + OFDMstate->ofdmPeriod;
         OFDMstate->channels = OFDMstate->ofdmPeriod / 2 + 1;  // half due to using real symbols (ie, not modulating to higher frequency carrier wave but staying in baseband) ie niquist
@@ -719,6 +719,14 @@ buffered_data_return_t OFDM(int long n, sample_double_t *outputSample, OFDM_stat
             output = 0;
             
             // wait for enough data in the pipe to generate a frame, or wait for enough time to pass to send a frame anyway.
+
+            // transmit a burst of noise at high power to help synchronizer detect future ISI?
+            //if(n - OFDMstate->state.frameStart >= OFDMstate->symbolPeriod - OFDMstate->guardPeriod - 1)
+            if(0)
+            {
+                double noiseAmplitude = 0.1 * OFDMstate->ofdmPeriod;  // there is a normalization factor
+                output += (double)rand() / ((double)RAND_MAX / (noiseAmplitude)) - (noiseAmplitude / 2);
+            }
 
             // check for exit from IDLE frame
             if(n - OFDMstate->state.frameStart >= OFDMstate->symbolPeriod * 1 - 1) // example of state change based on timing
@@ -841,7 +849,8 @@ buffered_data_return_t OFDM(int long n, sample_double_t *outputSample, OFDM_stat
                                 // set new symbol for testing
                                 for(int k = 0; k < OFDMstate->channels; k++)
                                 {
-                                    if(k < OFDMstate->channels)
+                                    if(1)
+                                    //if(k > 446 && k < 446+10)
                                     {
                                         //OFDMstate->currentOFDMSymbol[k] = 
                                         OFDMstate->OFDMsymbol.frequencyDomain[k] = 
@@ -849,15 +858,14 @@ buffered_data_return_t OFDM(int long n, sample_double_t *outputSample, OFDM_stat
                                             rand() % 2 * 2 - 1 +
                                             I*(rand() % 2 * 2 - 1);   // QPSK
                                             //1+I;
-                                        //OFDMstate->currentOFDMSymbol[k] = 
                                             //(double)(rand() % 4) / 2 - 1; // 4 level
                                             //rand() % 2 +
                                             //I*(rand() % 2); // on off key
-                                        //OFDMstate->currentOFDMSymbol[k] = 
                                             //rand() % 3 - 1; // zero sometimes
+                                        
+                                        //OFDMstate->OFDMsymbol.frequencyDomain[k] *= (double)OFDMstate->channels / 10 / 2;
 
                                     } else {
-                                        //OFDMstate->currentOFDMSymbol[k] = 0;
                                         OFDMstate->OFDMsymbol.frequencyDomain[k] = 0;
                                     }
                                 }
