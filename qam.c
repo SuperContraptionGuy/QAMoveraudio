@@ -15,7 +15,7 @@
 
 #define WARN_UNUSED __attribute__((warn_unused_result))
 
-#define DEBUG_LEVEL 0
+#define DEBUG_LEVEL 1
 #if DEBUG_LEVEL >= 1
     FILE* hexdumpStdIn = NULL;
     FILE* plotStdIn = NULL;
@@ -90,6 +90,21 @@ typedef struct
     int n;                  // index of sample at insertionIndex
 } circular_buffer_complex_t;
 
+typedef struct
+{
+    double *M_buffer;   // start of the block
+    double *L_buffer;   // offset M units into the block
+    double *buffer;     // same as L_buffer
+    double *M_next_buffer;  // offset (M + L) - M = L into the block (M units from the end)
+    int insertionIndex;     // insertion index for circular buffer starting at L_buffer with length L
+    int length;             // length of circular buffer L length of L
+    int L;                  // same as length
+    int M;                  // length of M_buffer
+    int N;                  // sum L + M
+    int n;                  // time index of the last sample inserted in L
+    int sampleRate;
+} overlap_save_buffer_double_t;
+
 // this is a bit lame. should use complex datatype
 typedef struct
 {
@@ -128,7 +143,7 @@ typedef struct
     // channel simulation stuff
     int simulateNoise;
     int simulateChannel;    // 0 don't simulate, 1 simulate
-    circular_buffer_double_t channelSimulationBuffer;   // holds samples to be used for simulating channel impulse response
+    overlap_save_buffer_double_t channelSimulationBuffer;   // holds samples to be used for simulating channel impulse response
     circular_buffer_double_t channelImpulseResponse;    // holds the impulse response of the channel.
 
     // fftw constructs
@@ -233,20 +248,55 @@ iqsample_t sequentialIQ(int symbolIndex, int square)
     return symbol;
 }
 
-buffered_data_return_t channelFilter(const circular_buffer_double_t *inputSamples, sample_double_t *outputSample, circular_buffer_double_t *impulseResponse, int justSimulate)
+/*
+ *  performs a DFT based linear convolution using overlap and save method
+ *  length of inputSamples should be the impulse response length plus the filter block length
+ *  I'll probably use a filter block length equal to the impulse response length
+ *
+*/
+buffered_data_return_t channelFilter(const overlap_save_buffer_double_t *inputSamples, sample_double_t *outputSample)
 {
-    // generate the filter from the inpulseResonse of the channel, hopefully rarely, let's just say once for now?
-    static double *filter = NULL;
-    static circular_buffer_complex_t frequencyResponse = {0};
-    static circular_buffer_complex_t reciprocalFrequencyResponse = {0};
-    static circular_buffer_complex_t inverseImpulseResponse = {0};
-    static circular_buffer_double_t  channelSimulationBuffer = {0};
+    static circular_buffer_double_t  impulseResponse = {0};                 // time domain of impulse response
+    static circular_buffer_complex_t frequencyResponse = {0};               // fft of impulse response
+
+    static circular_buffer_complex_t frequencyDomainSamples = {0};          // fft of inputSamples
+    static circular_buffer_double_t  timeDomainFilteredSamples = {0};       // output of the filter, feed to outputSample one at a time
+
+    // the fftw plans
+    static fftw_plan fftwImpulseToFrequency;
+    static fftw_plan fftwSamplesToFrequency;
+    static fftw_plan fftwFilteredSamplesToTime;
 
     static int initialized = 0; // have we generated the filter taps
     static int bufferPrimed = 0;    // have we waited for enough samples to start filtering
+
     if(!initialized)
     {
-        // initialize impulse response for testing
+        // intitialize the fftw related buffers
+
+        impulseResponse.length = inputSamples->N;
+        if((impulseResponse.buffer = fftw_malloc(sizeof(double) * impulseResponse.length)) == NULL)
+            fprintf(stderr, "Couldn't allocate memory for impulseResponse buffer. %s\n", strerror(errno));
+
+        timeDomainFilteredSamples.length = inputSamples->N;
+        if((timeDomainFilteredSamples.buffer = fftw_malloc(sizeof(double) * timeDomainFilteredSamples.length)) == NULL)
+            fprintf(stderr, "Couldn't allocate memory for impulseResponse buffer. %s\n", strerror(errno));
+
+        frequencyResponse.length = inputSamples->N / 2 + 1; // smaller in frequency space because of real data
+        //if((frequencyResponse.buffer = calloc(frequencyResponse.length, sizeof(double complex))) == NULL)
+        if((frequencyResponse.buffer = fftw_malloc(sizeof(fftw_complex) * frequencyResponse.length)) == NULL)
+            fprintf(stderr, "Couldn't allocate memory for frequency response buffer: %s\n", strerror(errno));
+
+        frequencyDomainSamples.length = inputSamples->N / 2 + 1; // smaller in frequency space because of real data
+        //if((frequencyDomainSamples.buffer = calloc(frequencyDomainSamples.length, sizeof(double complex))) == NULL)
+        if((frequencyDomainSamples.buffer = fftw_malloc(sizeof(fftw_complex) * frequencyDomainSamples.length)) == NULL)
+            fprintf(stderr, "Couldn't allocate memory for frequency response buffer: %s\n", strerror(errno));
+
+        fftwImpulseToFrequency =      fftw_plan_dft_r2c_1d(inputSamples->N, impulseResponse.buffer, frequencyResponse.buffer, FFTW_ESTIMATE);   // for calculating frequency response from impulse response.           used once
+        fftwSamplesToFrequency =      fftw_plan_dft_r2c_1d(inputSamples->N, inputSamples->M_buffer, frequencyDomainSamples.buffer, FFTW_MEASURE);  // for calculating frequency domain of input samples.                used many times
+        fftwFilteredSamplesToTime =   fftw_plan_dft_c2r_1d(inputSamples->N, frequencyDomainSamples.buffer, timeDomainFilteredSamples.buffer, FFTW_MEASURE);     // for calculating time domain of filtered samples    used many times
+
+        // fill impulse response buffer from file
         // pull the samples from a file called impulseResponse.raw
         int impulseResponseFile = open("data/impulseResponse.raw", O_RDONLY);
         if(impulseResponseFile == -1)
@@ -254,7 +304,7 @@ buffered_data_return_t channelFilter(const circular_buffer_double_t *inputSample
         // file format:
         //  S32_LE PCM mono samples
         //  so 4 bytes per sample
-        for(int i = 0; i < impulseResponse->length; i++)
+        for(int i = 0; i < inputSamples->M; i++)
         {
             // for type punning
             union __attribute__((packed))
@@ -271,73 +321,22 @@ buffered_data_return_t channelFilter(const circular_buffer_double_t *inputSample
             if((readBytes = read(impulseResponseFile, &readSample.bytes, sizeof(readSample.bytes))) == 0)
                 fprintf(stderr, "Reached end of impulseResponse.raw before filter was satisfied!\n");
 
-            impulseResponse->buffer[i] = (double)readSample.value / INT32_MAX;    // convert to a double between -1 and 1
-            //impulseResponse->buffer[i] = cos(2*M_PI * 100 * (double)i / impulseResponse->length) + cos(2*M_PI * 2 * (double)i / impulseResponse->length);
-            //impulseResponse->buffer[i] = cos(2*M_PI * 100 * (double)i / impulseResponse->length);
-            //impulseResponse->buffer[i] = exp((double)-i/100);
-            //impulseResponse->buffer[i] = exp(-pow((double)i/100 - 5, 2));
-            //impulseResponse->buffer[i] = 0;
-            //if(i % (impulseResponse->length/10) == 0)
-            //if(i == 0)
-                //impulseResponse->buffer[i] = 1;
-            //impulseResponse->insertionIndex++;
+            impulseResponse.buffer[i] = (double)readSample.value / INT32_MAX;    // convert to a double between -1 and 1
         }
         close(impulseResponseFile);
 
-        channelSimulationBuffer.length = impulseResponse->length;
-        if((channelSimulationBuffer.buffer = calloc(channelSimulationBuffer.length, sizeof(double))) == NULL)
-            fprintf(stderr, "Couldn't allocate memory for channel simulation buffer: %s\n", strerror(errno));
-
-        if(!justSimulate)
+        for(int i = 0; i < inputSamples->L; i++)
         {
-            //  fourier transform the impulseResponse
-
-            frequencyResponse.length = impulseResponse->length;
-            if((frequencyResponse.buffer = calloc(frequencyResponse.length, sizeof(double complex))) == NULL)
-                fprintf(stderr, "Couldn't allocate memory for frequency response buffer: %s\n", strerror(errno));
-            reciprocalFrequencyResponse.length = impulseResponse->length;
-            if((reciprocalFrequencyResponse.buffer = calloc(reciprocalFrequencyResponse.length, sizeof(double complex))) == NULL)
-                fprintf(stderr, "Couldn't allocate memory for reciprocal frequency response buffer: %s\n", strerror(errno));
-            inverseImpulseResponse.length = impulseResponse->length;
-            if((inverseImpulseResponse.buffer = calloc(inverseImpulseResponse.length, sizeof(double complex))) == NULL)
-                fprintf(stderr, "Couldn't allocate memory for inverse impulse response buffer: %s\n", strerror(errno));
-
-
-
-            int N = frequencyResponse.length;
-            for(int k = 0; k < N; k++)
-            {
-                for(int x =  0; x < N; x++)
-                {
-                    // dft
-                    frequencyResponse.buffer[k] += cexp(-I*2*M_PI * x/N * k) * impulseResponse->buffer[x];
-                }
-                //  take the reciprical
-                reciprocalFrequencyResponse.buffer[k] = 1. / frequencyResponse.buffer[k];
-                // filter out the high frequencies? or set max value for the gain of any frequency
-                //reciprocalFrequencyResponse.buffer[k] = fmax(fmin(creal(reciprocalFrequencyResponse.buffer[k]), 30), -30) + I*fmax(fmin(cimag(reciprocalFrequencyResponse.buffer[k]), 30), -30);
-                // chop down the extreme values
-                //if(cabs(reciprocalFrequencyResponse.buffer[k]) > 20)
-                    //reciprocalFrequencyResponse.buffer[k] = 0;
-
-                // chop off higher frequencies
-                //if(abs(k - reciprocalFrequencyResponse.length / 2) < reciprocalFrequencyResponse.length / 30)
-                    //reciprocalFrequencyResponse.buffer[k] = 0;
-                //reciprocalFrequencyResponse.buffer[k] = frequencyResponse.buffer[k];
-
-                //  reverse the fourier transform
-                for(int x =  0; x < N; x++)
-                {
-                    // inverse dft (negative phase, and normalization factor)
-                    inverseImpulseResponse.buffer[x] += cexp(I*2*M_PI * x/N * k) * reciprocalFrequencyResponse.buffer[k] / N;
-                }
-            }
+            impulseResponse.buffer[i + inputSamples->M] = 0;
         }
 
+        // initialize the frequency response buffer
+        fftw_execute(fftwImpulseToFrequency);
 
-
+        // run once
         initialized = 1;
     }
+
     /*
     if(debugPlots.channelFilterEnabled)
     {
@@ -374,96 +373,44 @@ buffered_data_return_t channelFilter(const circular_buffer_double_t *inputSample
     }
     */
 
-    // wait for enough samples to come in to do the first convolution
-    // I don't have to wait, I'm pulling in past samples, and before the first sample, they can be zeros
-    // at least for the test where I convolve the impulse response with the input
+    // wait for enough samples to come in to do the first DFT, then we can return the samples from the fft buffer one at a time
+    //if(inputSamples->n < inputSamples->length)
+    if(inputSamples->n < inputSamples->L - 1)
+        return AWAITING_SAMPLES;
 
-    //if(inputSamples->n < impulseResponse->length - 1)
-    //if(inputSamples->n < 0)
-        //return AWAITING_SAMPLES;
-
-    // just do a test, let's take the impulse response and convolve it with the input samples to simulate the channel
-    channelSimulationBuffer.buffer[channelSimulationBuffer.insertionIndex] = 0;
-    //outputSample->sample = 0;
-    for(int i = 0; i < impulseResponse->length; i++)
-    {
-        // multiply the filter by the input samples at respective times and sum the results
-        // index, start at most recent input sample and move backwards in time
-        int inputIndex = (inputSamples->insertionIndex - i) % inputSamples->length;
-        if(inputIndex < 0)
-            inputIndex += inputSamples->length;
-        int filterIndex = i;
-
-        //outputSample->sample += inputSamples->buffer[inputIndex] * impulseResponse->buffer[filterIndex] * -inverseImpulseResponse.buffer[filterIndex];
-        //outputSample->sample += inputSamples->buffer[inputIndex] * impulseResponse->buffer[filterIndex];
-        channelSimulationBuffer.buffer[channelSimulationBuffer.insertionIndex] += inputSamples->buffer[inputIndex] * impulseResponse->buffer[filterIndex];
-        outputSample->sample = channelSimulationBuffer.buffer[channelSimulationBuffer.insertionIndex];
-        //outputSample->sample += inputSamples->buffer[inputIndex] * inverseImpulseResponse.buffer[filterIndex];
-    }
-    channelSimulationBuffer.n = inputSamples->n;
-    outputSample->sampleIndex = inputSamples->n;
-    channelSimulationBuffer.sampleRate = inputSamples->sampleRate;
+    // return a sample from the dft buffer
+    // the very first sample will just be 0. could be an issue, it's becasue the fft hasn't run for the first time yet
+    //outputSample->sample = timeDomainFilteredSamples.buffer[inputSamples->n % timeDomainFilteredSamples.length + M];    // output one sample from the buffer, avoiding the first M samples always
+    outputSample->sample = timeDomainFilteredSamples.buffer[(inputSamples->n % inputSamples->L) + inputSamples->M];    // output one sample from the buffer, avoiding the first M samples always, and just using the last L samples
+    // normalize the output because we did ifft(fft(x)), so factor is 1/N
+    outputSample->sample /= inputSamples->N;
+    outputSample->sampleIndex = inputSamples->n - inputSamples->L;
     outputSample->sampleRate = inputSamples->sampleRate;
 
-    // increment channel sim buffer index now that we're done accessing it
-    channelSimulationBuffer.insertionIndex = (channelSimulationBuffer.insertionIndex + 1) % channelSimulationBuffer.length;
+    // after filling the L buffer, do an fft
 
-    // if just simulating channel, return the output now
-    if(justSimulate)
+    // if the input buffer has filled up again, recalculate the frequency domain, then multiply by frequency response, and do the inverse transform
+    //if(inputSamples->n % inputSamples->length == 0)
+    if(inputSamples->n % inputSamples->L == inputSamples->L - 1)    // go when the last sample is put into L
     {
-        return RETURNED_SAMPLE;
+        // to the dft on input samples
+        fftw_execute(fftwSamplesToFrequency);
+        // multiply by frequency response
+        for(int i = 0; i < frequencyDomainSamples.length; i++)
+        {
+            frequencyDomainSamples.buffer[i] = frequencyDomainSamples.buffer[i] * frequencyResponse.buffer[i];
+        }
+        // to the inverse transform
+        fftw_execute(fftwFilteredSamplesToTime);
+
+        // then copy the end of the L buffer into M for next fft
+        for(int i = 0; i < inputSamples->M; i++)
+        {
+            inputSamples->M_buffer[i] = inputSamples->M_next_buffer[i];
+        }
+
     }
 
-    // now reverse the channel by convolving the inverse filter
-
-    // wait for enough sampls to begin convolution
-    if(channelSimulationBuffer.n < channelSimulationBuffer.length - 1)
-        return AWAITING_SAMPLES;
-    // apply inverse filter
-    outputSample->sample = 0;
-    for(int i = 0; i < channelSimulationBuffer.length; i++)
-    {
-        // index, start at oldest sample, and move forward in time up to most recent
-        //int inputIndex = (channelSimulationBuffer.insertionIndex + 1 + i) % channelSimulationBuffer.length;
-        // start at newest sample and move backwards in time to oldest sample
-        int inputIndex = (channelSimulationBuffer.insertionIndex  - 1- i) % channelSimulationBuffer.length;
-        if(inputIndex < 0)
-            inputIndex += channelSimulationBuffer.length;
-        // reverse the filter direction, start at filter end, and work to beginning
-        //int filterIndex = inverseImpulseResponse.length - 1 - i;
-        int filterIndex = i;
-
-        outputSample->sample += channelSimulationBuffer.buffer[inputIndex] * creal(inverseImpulseResponse.buffer[filterIndex]);
-        //outputSample->sample += channelSimulationBuffer.buffer[i];
-    }
-    //outputSample->sample = channelSimulationBuffer.buffer[channelSimulationBuffer.insertionIndex+1];
-    outputSample->sampleIndex = channelSimulationBuffer.n - channelSimulationBuffer.length;
-    outputSample->sampleRate = channelSimulationBuffer.sampleRate;
-
-
-
-    //outputSample->sampleIndex = inputSamples->n - impulseResponse->length;
-    //outputSample->sampleIndex = inputSamples->n;
-    //outputSample->sampleIndex = inputSamples->n - 0;
-
-    // test, bypass
-    //outputSample->sample = inputSamples->buffer[inputSamples->insertionIndex];
-
-
-    /*
-    if(debugPlots.channelFilterEnabled)
-    {
-        fprintf(debugPlots.channelFilterStdin, "%i %i %f %i %f\n",
-                outputSample->sampleIndex,
-                //inputSamples->n,
-                2, -6 + channelSimulationBuffer.buffer[channelSimulationBuffer.insertionIndex],
-                9, -18 + outputSample->sample
-            );
-
-    }
-    */
-    // collect enough input samples ahead of the output timepoint to start filtering
-    // do one step of convolution to get one output sample
     return RETURNED_SAMPLE;
 }
 
@@ -666,10 +613,10 @@ buffered_data_return_t OFDM(int long n, sample_double_t *outputSample, OFDM_stat
 
         OFDMstate->sampleRate = 44100;
         //OFDMstate->guardPeriod = 0.13 * OFDMstate->sampleRate;  // measured impulse response of room lasts like a bit over a tenth of a second would be nice to have this adjusted on the fly
-        OFDMstate->guardPeriod = (1<<12) / 2;  // 2^12=1024 closest power of 2 to the impulse response length, slightly shorter
+        OFDMstate->guardPeriod = (1<<12);  // 2^12=1024 closest power of 2 to the impulse response length, slightly shorter
         //OFDMstate->guardPeriod = 128;   // faster testing
         //OFDMstate->guardPeriod = 0.001 * OFDMstate->sampleRate;  // measured impulse response of room lasts like a bit over a tenth of a second would be nice to have this adjusted on the fly
-        OFDMstate->ofdmPeriod = OFDMstate->guardPeriod * 8;   // dunno what the best OFDM period is compared to the guard period. I assume longer is better for channel efficiency, but maybe it's worse for noise? don't know
+        OFDMstate->ofdmPeriod = OFDMstate->guardPeriod * 4;   // dunno what the best OFDM period is compared to the guard period. I assume longer is better for channel efficiency, but maybe it's worse for noise? don't know
         //OFDMstate->ofdmPeriod = OFDMstate->guardPeriod * 8;   // dunno what the best OFDM period is compared to the guard period. I assume longer is better for channel efficiency, but maybe it's worse for noise? don't know
         OFDMstate->symbolPeriod = OFDMstate->guardPeriod + OFDMstate->ofdmPeriod;
         OFDMstate->channels = OFDMstate->ofdmPeriod / 2 + 1;  // half due to using real symbols (ie, not modulating to higher frequency carrier wave but staying in baseband) ie niquist
@@ -680,18 +627,19 @@ buffered_data_return_t OFDM(int long n, sample_double_t *outputSample, OFDM_stat
 
         if(OFDMstate->simulateChannel)
         {
-            OFDMstate->channelSimulationBuffer.length = 5912;
+            // initialize the overlap and save buffer
+            OFDMstate->channelSimulationBuffer.M = 5912;
+            OFDMstate->channelSimulationBuffer.L = OFDMstate->channelSimulationBuffer.M;
+            OFDMstate->channelSimulationBuffer.length = OFDMstate->channelSimulationBuffer.L;
+            OFDMstate->channelSimulationBuffer.N = OFDMstate->channelSimulationBuffer.L + OFDMstate->channelSimulationBuffer.M;
             OFDMstate->channelSimulationBuffer.insertionIndex = 0;
-            OFDMstate->channelSimulationBuffer.buffer = calloc(OFDMstate->channelSimulationBuffer.length, sizeof(double));
-            if(OFDMstate->channelSimulationBuffer.buffer == NULL)
+            //OFDMstate->channelSimulationBuffer.buffer = calloc(OFDMstate->channelSimulationBuffer.length, sizeof(double));
+            OFDMstate->channelSimulationBuffer.M_buffer = fftw_malloc(sizeof(double) * OFDMstate->channelSimulationBuffer.N);    // use fftw malloc since fftw will use this buffer
+            if(OFDMstate->channelSimulationBuffer.M_buffer == NULL)
                 fprintf(stderr, "cahnnelSimulationBuffer failed to allocate: %s\n", strerror(errno));
-
-            // initialize impulse response buffer
-            OFDMstate->channelImpulseResponse.length = 5912;
-            OFDMstate->channelImpulseResponse.insertionIndex = 0;
-            OFDMstate->channelImpulseResponse.buffer = calloc(OFDMstate->channelImpulseResponse.length, sizeof(double));
-            if(OFDMstate->channelImpulseResponse.buffer == NULL)
-                fprintf(stderr, "ImpulseResponse failed to allocate: %s\n", strerror(errno));
+            OFDMstate->channelSimulationBuffer.L_buffer = OFDMstate->channelSimulationBuffer.M_buffer + OFDMstate->channelSimulationBuffer.M;   // offset the L
+            OFDMstate->channelSimulationBuffer.buffer = OFDMstate->channelSimulationBuffer.L_buffer;
+            OFDMstate->channelSimulationBuffer.M_next_buffer = OFDMstate->channelSimulationBuffer.M_buffer + OFDMstate->channelSimulationBuffer.L;  // M_next_buffer is the last M numbers of L
         }
 
         // initialize fftw arrays
@@ -762,7 +710,7 @@ buffered_data_return_t OFDM(int long n, sample_double_t *outputSample, OFDM_stat
                                     if(OFDMstate->state.symbolIndex == 0)
                                     {
                                         if(k % 2 == 0)
-                                        //if(k > 16 && k < 24 && k % 2 == 0)
+                                        //if(k > 16 && k < 100 && k % 2 == 0)
                                         //if(k == OFDMstate->channels / 16)
                                         //if(k == 0)
                                         //if(0)
@@ -777,10 +725,10 @@ buffered_data_return_t OFDM(int long n, sample_double_t *outputSample, OFDM_stat
                                         }
                                     } else if(OFDMstate->state.symbolIndex == 1)
                                     {
-                                        //OFDMstate->currentOFDMSymbol[k] = 
                                         OFDMstate->OFDMsymbol.frequencyDomain[k] =
                                             rand() % 2 * 2 - 1 +
                                             I*(rand() % 2 * 2 - 1);
+                                            //0;
                                         //OFDMstate->currentOFDMSymbol[k] = 0;    // testing
                                     }
                                 }
@@ -849,8 +797,8 @@ buffered_data_return_t OFDM(int long n, sample_double_t *outputSample, OFDM_stat
                                 // set new symbol for testing
                                 for(int k = 0; k < OFDMstate->channels; k++)
                                 {
-                                    if(1)
-                                    //if(k > 446 && k < 446+10)
+                                    //if(1)
+                                    if(k > 446 && k < 446+10)
                                     {
                                         //OFDMstate->currentOFDMSymbol[k] = 
                                         OFDMstate->OFDMsymbol.frequencyDomain[k] = 
@@ -918,30 +866,42 @@ buffered_data_return_t OFDM(int long n, sample_double_t *outputSample, OFDM_stat
     double normalizationFactor = OFDMstate->ofdmPeriod;   // normalization factor due to the inverse transform
     output /= normalizationFactor;
 
+    /*
+    // impulse train for testing the channel simulator
+    output = 0;
+    if(n % 10000 == 0)
+        output = 1;
+    */
+
     // channel simulation
     sample_double_t equalizedSample;
     // decide whether to simulate the channel response or not
     if(OFDMstate->simulateChannel)
     {
-            // channel simulation filter
-            OFDMstate->channelSimulationBuffer.buffer[OFDMstate->channelSimulationBuffer.insertionIndex] = output;
+        // channel simulation filter
+        //OFDMstate->channelSimulationBuffer.insertionIndex = n % OFDMstate->channelSimulationBuffer.length;
+        OFDMstate->channelSimulationBuffer.buffer[OFDMstate->channelSimulationBuffer.insertionIndex] = output;
+        OFDMstate->channelSimulationBuffer.n = n;
 
-            buffered_data_return_t returnValue = channelFilter(&OFDMstate->channelSimulationBuffer, &equalizedSample, &OFDMstate->channelImpulseResponse, 1);
+        buffered_data_return_t returnValue = channelFilter(&OFDMstate->channelSimulationBuffer, &equalizedSample);
 
-            OFDMstate->channelSimulationBuffer.insertionIndex = (OFDMstate->channelSimulationBuffer.insertionIndex + 1) % OFDMstate->channelSimulationBuffer.length;
+        OFDMstate->channelSimulationBuffer.insertionIndex = (OFDMstate->channelSimulationBuffer.insertionIndex + 1) % OFDMstate->channelSimulationBuffer.length;
 
-            if(returnValue != RETURNED_SAMPLE)
-                return AWAITING_SAMPLES;
+        if(returnValue != RETURNED_SAMPLE)
+            return AWAITING_SAMPLES;
 
-        // add noise to output
-        double noiseAmplitude = 0.01;
-        if(OFDMstate->simulateNoise)
-            equalizedSample.sample += (double)rand() / ((double)RAND_MAX / (noiseAmplitude)) - (noiseAmplitude / 2);
 
     } else {
 
         // skip channel simulation
         equalizedSample.sample = output;
+    }
+
+    // add noise to output after channel filtering
+    if(OFDMstate->simulateNoise)
+    {
+        double noiseAmplitude = 0.01;
+        equalizedSample.sample += (double)rand() / ((double)RAND_MAX / (noiseAmplitude)) - (noiseAmplitude / 2);
     }
 
     *outputSample = equalizedSample;
@@ -1024,12 +984,22 @@ static double WARN_UNUSED calculateSample(int n, int sampleRate)
 
     static OFDM_state_t OFDMstate = {0};
     sample_double_t returnedSample;
-    buffered_data_return_t returnValue = AWAITING_SAMPLES;
-    for(int i = n; returnValue == AWAITING_SAMPLES; i++)
+
+    static buffered_data_return_t returnValue = AWAITING_SAMPLES;
+    static int offset = 0;
+    if(returnValue == AWAITING_SAMPLES)
     {
-        // call the function as many times as needed until it returns a sample
-        returnValue = OFDM(n, &returnedSample, &OFDMstate);
+        // run until first sample is returned
+        for(int i = n; returnValue == AWAITING_SAMPLES; i++)
+        {
+            // call the function as many times as needed until it returns a sample
+            returnValue = OFDM(i, &returnedSample, &OFDMstate);
+            offset = i;
+        }
+        return returnedSample.sample;
     }
+    // from then on just run once per sample
+    OFDM(n + offset, &returnedSample, &OFDMstate);
     return returnedSample.sample;
 
     //return OFDM(n, &OFDMstate);
