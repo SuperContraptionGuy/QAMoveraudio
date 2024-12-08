@@ -1,3 +1,4 @@
+#include <fftw3.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -60,6 +61,7 @@ typedef struct
     FILE* gardnerAlgoStdin;
     FILE* OFDMtimingSyncStdin;
     FILE* channelFilterStdin;
+    FILE* OFDMdecoderStdin;
     union
     {
         struct
@@ -76,6 +78,7 @@ typedef struct
             unsigned int gardnerAlgoEnabled         : 1;
             unsigned int OFDMtimingSyncEnabled      : 1;
             unsigned int channelFilterEnabled       : 1;
+            unsigned int OFDMdecoderEnabled         : 1;
         };
             unsigned long int flags;
     };
@@ -123,7 +126,10 @@ typedef struct
 
     int initialized;
 
-    circular_buffer_double_t preambleDetectorInputBuffer; // holds the last symbolperiod of samples
+    circular_buffer_double_t preambleDetectorInputBuffer; // holds the last ofdmPeriod plus a little of samples for preamble detection
+
+    circular_buffer_double_t fftwSymbolBuffer;              // holds the incoming ofdmPeriod number of samples
+    int ofdmPhaseOffset;                        // stores the offset in sample number to start taking cutting out OFDM symbols
 
     int simulateChannel;    // 0 don't simulate, 1 simulate
     circular_buffer_double_t channelSimulationBuffer;   // holds samples to be used for simulating channel impulse response
@@ -639,9 +645,11 @@ buffered_data_return_t raisedCosFilter(const circular_buffer_complex_t *inputSam
     return RETURNED_SAMPLE;
 }
 
-buffered_data_return_t averagingFilter(const circular_buffer_double_t *inputSamples, sample_double_t *outputSample)
+buffered_data_return_t averagingFilter(const circular_buffer_double_t *inputSamples, sample_double_t *outputSample, double *runningAverage)
 {
+    /*
     double average = 0;
+    // convlutional method
     for(int i  = 0; i < inputSamples->length; i++)
     {
         average += inputSamples->buffer[i];
@@ -651,11 +659,40 @@ buffered_data_return_t averagingFilter(const circular_buffer_double_t *inputSamp
     outputSample->sampleRate = inputSamples->sampleRate;
     outputSample->sample = average;
     return RETURNED_SAMPLE;
+    */
+
+    // iterative method
+    //static double iterativeAverage = 0;
+    int lateIndex = inputSamples->insertionIndex;   // newest index
+    int earlyIndex = (inputSamples->insertionIndex + 1) % inputSamples->length;  // oldest index
+    *runningAverage += (inputSamples->buffer[lateIndex] - inputSamples->buffer[earlyIndex]) / inputSamples->length;
+
+    outputSample->sampleIndex = inputSamples->n - inputSamples->length / 2; // center the filter so it averages before and after in a sliding window
+    outputSample->sampleRate = inputSamples->sampleRate;
+    outputSample->sample = *runningAverage;
+
+    return RETURNED_SAMPLE;
 }
 
 // detect the most likely/optimal for the channel conditions ofdm frame start time
 buffered_data_return_t timingPeakDetectionFilter(const circular_buffer_double_t *inputSamples, sample_double_t *outputSample, debugPlots_t debugPlots)
 {
+    // width of input window should be some 4 times larger than guard interval
+    sample_double_t minimumFirstHalf = {0};
+    minimumFirstHalf.sample = inputSamples->buffer[(inputSamples->insertionIndex + 1) % inputSamples->length];    // equals value of first sample
+    minimumFirstHalf.sampleIndex = inputSamples->n - inputSamples->length + 1;
+    minimumFirstHalf.sampleRate = inputSamples->sampleRate;
+
+    sample_double_t minimumSecondHalf = {0};
+    minimumSecondHalf.sample = inputSamples->buffer[inputSamples->insertionIndex];    // equals value of last sample
+    minimumSecondHalf.sampleIndex = inputSamples->n;
+    minimumSecondHalf.sampleRate = inputSamples->sampleRate;
+
+    sample_double_t maximum = {0};
+    maximum.sample = inputSamples->buffer[(inputSamples->insertionIndex + 1 + inputSamples->length / 2) % inputSamples->length];    // equals value right in the middle
+    maximum.sampleIndex = inputSamples->n - inputSamples->length + inputSamples->length / 2;
+    maximum.sampleRate = inputSamples->sampleRate;
+    /*
     // width of input window should be some 4 times larger than guard interval
     sample_double_t minimumFirstHalf = {0};
     //minimumFirstHalf.sample = inputSamples->buffer[inputSamples->insertionIndex + 1];    // equals value of first sample
@@ -677,46 +714,51 @@ buffered_data_return_t timingPeakDetectionFilter(const circular_buffer_double_t 
     //maximum.sampleIndex = inputSamples->n - inputSamples->length + 1;
     maximum.sampleIndex = -1;
     maximum.sampleRate = inputSamples->sampleRate;
-    
-    for(int i = 0; i < inputSamples->length; i++)
-    {
-        double value = inputSamples->buffer[(inputSamples->insertionIndex + 1 + i) % inputSamples->length];
-        double index = inputSamples->n - inputSamples->length + 1 + i;
-
-        if(value >= maximum.sample)
-        {
-            // maximum overall
-            maximum.sample = value;
-            maximum.sampleIndex = index;
-        } 
-        if(i < inputSamples->length / 2 && value < minimumFirstHalf.sample)
-        {
-            // determine minimum of first half of samples
-            minimumFirstHalf.sample = value;
-            minimumFirstHalf.sampleIndex = index;
-        }
-        if(i >= inputSamples->length / 2 && value <= minimumSecondHalf.sample)
-        {
-            // minimum of last half of samples
-            minimumSecondHalf.sample = value;
-            minimumSecondHalf.sampleIndex = index;
-        }
-    }
-    
+    */
     // if first and second half minimums are below some threshold
     // if maximum overall is above some threshold
     // if the maximum occurs between the minima
     double lowerThreshold = 0.6;
     double upperThreshold = 0.7;
-    outputSample->sample = 0;
-    outputSample->sampleIndex = 0;
-    outputSample->sampleRate = inputSamples->sampleRate;
-    if(minimumSecondHalf.sample < lowerThreshold && minimumFirstHalf.sample < lowerThreshold && maximum.sample > upperThreshold && minimumFirstHalf.sampleIndex < maximum.sampleIndex&& minimumSecondHalf.sampleIndex > maximum.sampleIndex)
+    
+    // only run the convolution if it's likely to be close, because it's really slow
+    if(minimumFirstHalf.sample < lowerThreshold && minimumSecondHalf.sample < lowerThreshold && maximum.sample > upperThreshold)
     {
-        // the offset is the index value of the maximum
-        outputSample->sample = 1;
-        outputSample->sampleIndex = maximum.sampleIndex;    // index is the offset of maximum
-        return RETURNED_SAMPLE; // only return a sample when preamble is detected
+        for(int i = 0; i < inputSamples->length; i++)
+        {
+            double value = inputSamples->buffer[(inputSamples->insertionIndex + 1 + i) % inputSamples->length];
+            double index = inputSamples->n - inputSamples->length + 1 + i;
+
+            if(value >= maximum.sample)
+            {
+                // maximum overall
+                maximum.sample = value;
+                maximum.sampleIndex = index;
+            } 
+            if(i < inputSamples->length / 2 && value < minimumFirstHalf.sample)
+            {
+                // determine minimum of first half of samples
+                minimumFirstHalf.sample = value;
+                minimumFirstHalf.sampleIndex = index;
+            }
+            if(i >= inputSamples->length / 2 && value <= minimumSecondHalf.sample)
+            {
+                // minimum of last half of samples
+                minimumSecondHalf.sample = value;
+                minimumSecondHalf.sampleIndex = index;
+            }
+        }
+        
+        outputSample->sample = 0;
+        outputSample->sampleIndex = 0;
+        outputSample->sampleRate = inputSamples->sampleRate;
+        if(minimumSecondHalf.sample < lowerThreshold && minimumFirstHalf.sample < lowerThreshold && maximum.sample > upperThreshold && minimumFirstHalf.sampleIndex < maximum.sampleIndex&& minimumSecondHalf.sampleIndex > maximum.sampleIndex)
+        {
+            // the offset is the index value of the maximum
+            outputSample->sample = 1;
+            outputSample->sampleIndex = maximum.sampleIndex;    // index is the offset of maximum
+            return RETURNED_SAMPLE; // only return a sample when preamble is detected
+        }
     }
     return AWAITING_SAMPLES;
 }
@@ -1082,16 +1124,17 @@ buffered_data_return_t demodualteOFDM( const sample_double_t *sample, OFDM_prope
         OFDMstate->state.frameStart = sample->sampleIndex;
 
         OFDMstate->sampleRate = 44100;
-        OFDMstate->guardPeriod = (1<<12) / 2;  // 2^12=1024 closest power of 2 to the impulse response length, slightly shorter
+        OFDMstate->guardPeriod = (1<<12);  // 2^12=1024 closest power of 2 to the impulse response length, slightly shorter
         //OFDMstate->guardPeriod = 128;
-        OFDMstate->ofdmPeriod = OFDMstate->guardPeriod * 8;   // dunno what the best OFDM period is compared to the guard period. I assume longer is better for channel efficiency, but maybe it's worse for noise? don't know
+        OFDMstate->ofdmPeriod = OFDMstate->guardPeriod * 4;   // dunno what the best OFDM period is compared to the guard period. I assume longer is better for channel efficiency, but maybe it's worse for noise? don't know
         //OFDMstate->ofdmPeriod = OFDMstate->guardPeriod * 8;   // dunno what the best OFDM period is compared to the guard period. I assume longer is better for channel efficiency, but maybe it's worse for noise? don't know
         OFDMstate->symbolPeriod = OFDMstate->guardPeriod + OFDMstate->ofdmPeriod;
         OFDMstate->channels = OFDMstate->ofdmPeriod / 2;  // half due to using real symbols (ie, not modulating to higher frequency carrier wave but staying in baseband)
 
         // initialize buffer to hold input samples for further processing
-        OFDMstate->preambleDetectorInputBuffer.buffer = calloc(OFDMstate->ofdmPeriod, sizeof(double));
-        OFDMstate->preambleDetectorInputBuffer.length = OFDMstate->ofdmPeriod;
+        OFDMstate->preambleDetectorInputBuffer.length = OFDMstate->ofdmPeriod + 1;
+        //OFDMstate->preambleDetectorInputBuffer.length = OFDMstate->symbolPeriod * 1.5;  // a little extra, this will also be the buffer used for FFTs after a transmission is detected
+        OFDMstate->preambleDetectorInputBuffer.buffer = calloc(OFDMstate->preambleDetectorInputBuffer.length, sizeof(double));
         OFDMstate->preambleDetectorInputBuffer.sampleRate = OFDMstate->sampleRate;
         if(OFDMstate->preambleDetectorInputBuffer.buffer == NULL)
             fprintf(stderr, "couldn't allocate ofdm symbol buffer.\n");
@@ -1128,14 +1171,12 @@ buffered_data_return_t demodualteOFDM( const sample_double_t *sample, OFDM_prope
         if(OFDMstate->timingFilterInputBuffer.buffer == NULL)
             fprintf(stderr, "Failed to allocate timing input buffer: %s\n", strerror(errno));
 
-        /*
-        // initialize auto correlation derivative averaging filter
-        OFDMstate->autoCorrelationDerivativeAverageBuffer.length = 500;
-        OFDMstate->autoCorrelationDerivativeAverageBuffer.insertionIndex = 0;
-        OFDMstate->autoCorrelationDerivativeAverageBuffer.buffer = calloc(OFDMstate->autoCorrelationDerivativeAverageBuffer.length, sizeof(double));
-        if(OFDMstate->autoCorrelationDerivativeAverageBuffer.buffer == NULL)
-            fprintf(stderr, "Failed to allocate averaging buffer: %s\n", strerror(errno));
-        */
+        // initialize ofdm symbol buffer
+        OFDMstate->fftwSymbolBuffer.length = OFDMstate->ofdmPeriod;
+        OFDMstate->fftwSymbolBuffer.insertionIndex = 0;
+        OFDMstate->fftwSymbolBuffer.buffer = fftw_malloc(sizeof(double) * OFDMstate->fftwSymbolBuffer.length);
+        if(OFDMstate->fftwSymbolBuffer.buffer == NULL)
+            fprintf(stderr, "failed to allocate fftw symbol buffer. %s\n", strerror(errno));
 
         // run once
         OFDMstate->initialized = 1;
@@ -1176,38 +1217,72 @@ buffered_data_return_t demodualteOFDM( const sample_double_t *sample, OFDM_prope
             OFDMstate->preambleDetectorInputBuffer.n = equalizedSample.sampleIndex;
 
             // auto correlation filter preample detector
-            double lastAutoCorrelation;
-            lastAutoCorrelation = OFDMstate->autoCorrelation.sample;
-            double secondHalfEnergy = 0;
-            OFDMstate->autoCorrelation.sample = 0;
-            OFDMstate->autoCorrelation.sampleIndex = OFDMstate->preambleDetectorInputBuffer.n - OFDMstate->preambleDetectorInputBuffer.length;
             // run a correlation between the first half of the symbol in the buffer, and the second half
-            for(int i = 0; i < OFDMstate->preambleDetectorInputBuffer.length / 2; i++)
+            /*
+            double convolutionSecondHalfEnergy = 0;
+            double convolutionAutocorrelation = 0;
+            for(int i = 0; i < OFDMstate->ofdmPeriod / 2; i++)
             {
                 //break;
                 int firstHalfIndex = (OFDMstate->preambleDetectorInputBuffer.insertionIndex + 1 + i) % OFDMstate->preambleDetectorInputBuffer.length;
-                int secondHalfIndex = (firstHalfIndex + OFDMstate->preambleDetectorInputBuffer.length / 2) % OFDMstate->preambleDetectorInputBuffer.length;
+                int secondHalfIndex = (firstHalfIndex + OFDMstate->ofdmPeriod / 2) % OFDMstate->preambleDetectorInputBuffer.length;
 
-                OFDMstate->autoCorrelation.sample += OFDMstate->preambleDetectorInputBuffer.buffer[firstHalfIndex] * OFDMstate->preambleDetectorInputBuffer.buffer[secondHalfIndex];
-                secondHalfEnergy += pow(OFDMstate->preambleDetectorInputBuffer.buffer[secondHalfIndex], 2);
+                //OFDMstate->autoCorrelation.sample += OFDMstate->preambleDetectorInputBuffer.buffer[firstHalfIndex] * OFDMstate->preambleDetectorInputBuffer.buffer[secondHalfIndex];
+                convolutionAutocorrelation += OFDMstate->preambleDetectorInputBuffer.buffer[firstHalfIndex] * OFDMstate->preambleDetectorInputBuffer.buffer[secondHalfIndex];
+                convolutionSecondHalfEnergy += pow(OFDMstate->preambleDetectorInputBuffer.buffer[secondHalfIndex], 2);
             }
-            OFDMstate->autoCorrelation.sample = fabs(OFDMstate->autoCorrelation.sample) / secondHalfEnergy; // normalization to remove average gain dependance
+            */
+            // simplified iterative version of the auto correlation
+            static double iterativeAutocorrelation = 0;;
+            static double secondHalfEnergy = 0;
+            OFDMstate->autoCorrelation.sample = 0;
+            OFDMstate->autoCorrelation.sampleIndex = OFDMstate->preambleDetectorInputBuffer.n - OFDMstate->ofdmPeriod;
+            //int secondHalfSecondIndex = (OFDMstate->preambleDetectorInputBuffer.insertionIndex) % OFDMstate->preambleDetectorInputBuffer.length;
+            //int secondHalfFirstIndex = (secondHalfSecondIndex - (OFDMstate->preambleDetectorInputBuffer.length / 2 - 1)) % OFDMstate->preambleDetectorInputBuffer.length;
 
-            // increment insertion index of input buffer
-            OFDMstate->preambleDetectorInputBuffer.insertionIndex = (OFDMstate->preambleDetectorInputBuffer.insertionIndex + 1) % OFDMstate->preambleDetectorInputBuffer.length;
+            //int firstHalfFirstIndex = (OFDMstate->preambleDetectorInputBuffer.insertionIndex + 1) % OFDMstate->preambleDetectorInputBuffer.length;
+            //int firstHalfSecondIndex = (firstHalfFirstIndex + OFDMstate->preambleDetectorInputBuffer.length / 2 - 1) % OFDMstate->preambleDetectorInputBuffer.length;
+            //int secondHalfFirstIndex = (firstHalfFirstIndex + OFDMstate->preambleDetectorInputBuffer.length / 2 - 1) % OFDMstate->preambleDetectorInputBuffer.length;
+            //int secondHalfSecondIndex = (secondHalfFirstIndex + OFDMstate->preambleDetectorInputBuffer.length / 2 - 1) % OFDMstate->preambleDetectorInputBuffer.length;
 
+            int firstHalfFirstIndex = (OFDMstate->preambleDetectorInputBuffer.insertionIndex + OFDMstate->preambleDetectorInputBuffer.length - OFDMstate->ofdmPeriod) % OFDMstate->preambleDetectorInputBuffer.length;
+            int firstHalfSecondIndex = (firstHalfFirstIndex + OFDMstate->ofdmPeriod / 2) % OFDMstate->preambleDetectorInputBuffer.length;
+            int secondHalfFirstIndex = (firstHalfSecondIndex) % OFDMstate->preambleDetectorInputBuffer.length;
+            int secondHalfSecondIndex = (secondHalfFirstIndex + OFDMstate->ofdmPeriod / 2) % OFDMstate->preambleDetectorInputBuffer.length;
+
+            if(secondHalfFirstIndex < 0)    // fix possible negatives due to subtraction
+                secondHalfFirstIndex += OFDMstate->preambleDetectorInputBuffer.length;
+            double point_d =   OFDMstate->preambleDetectorInputBuffer.buffer[firstHalfFirstIndex];      // d    oldest sample
+            double point_dl =  OFDMstate->preambleDetectorInputBuffer.buffer[firstHalfSecondIndex];   // d+L  middle sample
+            double point_dl2 =  OFDMstate->preambleDetectorInputBuffer.buffer[secondHalfFirstIndex];   // d+L  middle sample
+            double point_d2l = OFDMstate->preambleDetectorInputBuffer.buffer[secondHalfSecondIndex];         // d+2L most recent sample 
+            iterativeAutocorrelation = iterativeAutocorrelation + 
+                point_dl * point_d2l -
+                point_d * point_dl;
+            secondHalfEnergy = secondHalfEnergy +
+                pow(point_d2l, 2) -
+                pow(point_dl, 2);
+
+            OFDMstate->autoCorrelation.sample = fabs(iterativeAutocorrelation) / secondHalfEnergy; // normalization to remove average gain dependance
+            if(secondHalfEnergy == 0)
+                OFDMstate->autoCorrelation.sample = 0;  // eliminate divide by zero error
+
+            //OFDMstate->autoCorrelation.sample = (iterativeAutocorrelation); // normalization to remove average gain dependance
 
             // average filtered auto correlation signal
             OFDMstate->autoCorrelationAverageBuffer.buffer[OFDMstate->autoCorrelationAverageBuffer.insertionIndex] = OFDMstate->autoCorrelation.sample;
             OFDMstate->autoCorrelationAverageBuffer.n = OFDMstate->autoCorrelation.sampleIndex;
+            static double runningAverage = 0;       // for the averaging function
             sample_double_t averageValue = {0};
-            averagingFilter(&OFDMstate->autoCorrelationAverageBuffer, &averageValue);
+            averagingFilter(&OFDMstate->autoCorrelationAverageBuffer, &averageValue, &runningAverage);
             OFDMstate->autoCorrelationAverageBuffer.insertionIndex = (OFDMstate->autoCorrelationAverageBuffer.insertionIndex + 1) % OFDMstate->autoCorrelationAverageBuffer.length;
 
 
             OFDMstate->timingFilterInputBuffer.buffer[OFDMstate->timingFilterInputBuffer.insertionIndex] = averageValue.sample;
             OFDMstate->timingFilterInputBuffer.n = averageValue.sampleIndex;
             sample_double_t timingSignal = {0};
+            //timingSignal.sample = 1;
+            //buffered_data_return_t returnValue = AWAITING_SAMPLES;
             buffered_data_return_t returnValue = timingPeakDetectionFilter(&OFDMstate->timingFilterInputBuffer, &timingSignal, debugPlots);
 
             OFDMstate->timingFilterInputBuffer.insertionIndex = (OFDMstate->timingFilterInputBuffer.insertionIndex + 1) % OFDMstate->timingFilterInputBuffer.length;
@@ -1224,27 +1299,85 @@ buffered_data_return_t demodualteOFDM( const sample_double_t *sample, OFDM_prope
                 fprintf(debugPlots.OFDMtimingSyncStdin, "%i %i %f\n", averageValue.sampleIndex, 4, averageValue.sample);
                 //fprintf(debugPlots.OFDMtimingSyncStdin, "%i %i %f\n", averageDerivative.sampleIndex, 5, averageDerivative.sample + 1);
 
+                //fprintf(debugPlots.OFDMtimingSyncStdin, "%i %i %f\n", OFDMstate->autoCorrelation.sampleIndex + OFDMstate->ofdmPeriod / 2, 7, point_dl * point_d2l);
+                //fprintf(debugPlots.OFDMtimingSyncStdin, "%i %i %f\n", OFDMstate->autoCorrelation.sampleIndex, 8, point_d * point_dl);
+                //fprintf(debugPlots.OFDMtimingSyncStdin, "%i %i %f\n", OFDMstate->autoCorrelation.sampleIndex, 9, convolutionAutocorrelation);
+                //fprintf(debugPlots.OFDMtimingSyncStdin, "%i %i %f\n", OFDMstate->autoCorrelation.sampleIndex, 10, convolutionSecondHalfEnergy);
+                fprintf(debugPlots.OFDMtimingSyncStdin, "%i %i %f\n", OFDMstate->autoCorrelation.sampleIndex, 11, secondHalfEnergy);
+
             }
 
+            // preambe triggered
             if(returnValue == RETURNED_SAMPLE)
             {
 
                 // plot timing mark
                 if(debugPlots.OFDMtimingSyncEnabled)
                 {
-                    fprintf(debugPlots.OFDMtimingSyncStdin, "%i %i %i\n", timingSignal.sampleIndex, 6, 0);
+                    //fprintf(debugPlots.OFDMtimingSyncStdin, "%i %i %i\n", timingSignal.sampleIndex, 6, 0);
                     fprintf(debugPlots.OFDMtimingSyncStdin, "%i %i %i\n", timingSignal.sampleIndex, 6, 1);
-                    fprintf(debugPlots.OFDMtimingSyncStdin, "%i %i %i\n", timingSignal.sampleIndex, 6, 0);
+                    //fprintf(debugPlots.OFDMtimingSyncStdin, "%i %i %i\n", timingSignal.sampleIndex, 6, 0);
                 }
 
                 // change state to active
-                // put the timing offset somewhere
+                // save the timing offset
+                OFDMstate->ofdmPhaseOffset = timingSignal.sampleIndex;
+                // copy the preamble ofdm symbol samples into the ofdm symbol buffer
+                OFDMstate->fftwSymbolBuffer.insertionIndex = 0;
+                for(int i = 0; i < OFDMstate->ofdmPeriod; i++)
+                {
+                    //int preambleBufferIndex = (OFDMstate->ofdmPhaseOffset - OFDMstate->preambleDetectorInputBuffer.n + OFDMstate->preambleDetectorInputBuffer.length + OFDMstate->preambleDetectorInputBuffer.insertionIndex + i) % OFDMstate->preambleDetectorInputBuffer.length;  // grab the index of the start of the preamble symbol
+                    int preambleBufferIndex = (OFDMstate->preambleDetectorInputBuffer.insertionIndex + OFDMstate->preambleDetectorInputBuffer.length - (OFDMstate->preambleDetectorInputBuffer.n - OFDMstate->ofdmPhaseOffset) + i) % OFDMstate->preambleDetectorInputBuffer.length;  // grab the index of the start of the preamble symbol
+                    OFDMstate->fftwSymbolBuffer.buffer[OFDMstate->fftwSymbolBuffer.insertionIndex] = OFDMstate->preambleDetectorInputBuffer.buffer[preambleBufferIndex];
+
+                    if(debugPlots.OFDMdecoderEnabled)
+                    {
+                        fprintf(debugPlots.OFDMdecoderStdin, "%i %i %f\n", OFDMstate->fftwSymbolBuffer.insertionIndex, 0, OFDMstate->fftwSymbolBuffer.buffer[OFDMstate->fftwSymbolBuffer.insertionIndex]);
+                        fprintf(debugPlots.OFDMdecoderStdin, "%i %i %f\n",OFDMstate->fftwSymbolBuffer.insertionIndex + OFDMstate->guardPeriod, 1, OFDMstate->preambleDetectorInputBuffer.buffer[preambleBufferIndex] - 0.15);
+                        fprintf(debugPlots.OFDMdecoderStdin, "%i %i %f\n",OFDMstate->fftwSymbolBuffer.insertionIndex + OFDMstate->guardPeriod, 2, -0.15 + 0.02);
+                    }
+                    //increment
+                    OFDMstate->fftwSymbolBuffer.insertionIndex = (OFDMstate->fftwSymbolBuffer.insertionIndex + 1) % OFDMstate->fftwSymbolBuffer.length;
+                }
+                OFDMstate->fftwSymbolBuffer.n = OFDMstate->ofdmPeriod;
+                OFDMstate->fftwSymbolBuffer.sampleRate = OFDMstate->preambleDetectorInputBuffer.sampleRate;
                 OFDMstate->state.frame = ACTIVE;
             }
+
+            // increment insertion index of input buffer
+            OFDMstate->preambleDetectorInputBuffer.insertionIndex = (OFDMstate->preambleDetectorInputBuffer.insertionIndex + 1) % OFDMstate->preambleDetectorInputBuffer.length;
 
             break;
         case ACTIVE:
             // demodulate the data signals and maintain timing and frequency lock
+            //OFDMstate->fftwSymbolBuffer.n = sample->sampleIndex - OFDMstate->ofdmPhaseOffset;
+
+            if(debugPlots.OFDMdecoderEnabled)
+            {
+                fprintf(debugPlots.OFDMdecoderStdin, "%i %i %f\n",sample->sampleIndex - OFDMstate->ofdmPhaseOffset + OFDMstate->guardPeriod, 1, sample->sample - 0.15);
+            }
+
+            if((sample->sampleIndex - OFDMstate->ofdmPhaseOffset + OFDMstate->guardPeriod) % OFDMstate->symbolPeriod > OFDMstate->guardPeriod - 1)   // if it's in the ofdm symbol period, copy it in, otherwise ignore it
+            {
+                // ofdm period
+
+                OFDMstate->fftwSymbolBuffer.buffer[OFDMstate->fftwSymbolBuffer.insertionIndex] = sample->sample;
+                if(debugPlots.OFDMdecoderEnabled)
+                {
+                    fprintf(debugPlots.OFDMdecoderStdin, "%i %i %f\n", OFDMstate->fftwSymbolBuffer.n, 0, OFDMstate->fftwSymbolBuffer.buffer[OFDMstate->fftwSymbolBuffer.insertionIndex]);
+                    fprintf(debugPlots.OFDMdecoderStdin, "%i %i %f\n",sample->sampleIndex - OFDMstate->ofdmPhaseOffset + OFDMstate->guardPeriod, 2, -0.15 + 0.02);
+                }
+                // increment
+                OFDMstate->fftwSymbolBuffer.insertionIndex = (OFDMstate->fftwSymbolBuffer.insertionIndex + 1) % OFDMstate->fftwSymbolBuffer.length;
+                OFDMstate->fftwSymbolBuffer.n++;
+            } else {
+
+                // guard period
+                if(debugPlots.OFDMdecoderEnabled)
+                {
+                    fprintf(debugPlots.OFDMdecoderStdin, "%i %i %f\n",sample->sampleIndex - OFDMstate->ofdmPhaseOffset + OFDMstate->guardPeriod, 2, -0.15);
+                }
+            }
             break;
     }
 
@@ -1583,6 +1716,11 @@ int main(void)
         "--legend 4 \"preamble auto correlation average\" "
         "--legend 5 \"preamble auto correlation derivative average\" "
         "--legend 6 \"OFDM Transmission found, at given offset\" "
+        "--legend 7 \"d+l * d+2l\" "
+        "--legend 8 \"d * d+l\" "
+        "--legend 9 \"convolution auto correlation\" "
+        "--legend 10 \"convolution second half energy\" "
+        "--legend 11 \"second half energy\" "
 
     ;
     debugPlots.OFDMtimingSyncStdin = popen(OFDMtimingSyncPlot, "w");
@@ -1590,6 +1728,21 @@ int main(void)
     {
         fprintf(stderr, "Failed to create OFDM timing sync plot: %s\n", strerror(errno));
         retval = 11;
+        goto exit;
+    }
+
+    char *OFDMdecoderPlot =
+        "feedgnuplot "
+        "--domain --dataid --lines "
+        "--title \"OFDM symbol decoder\" "
+        "--xlabel \"sample number\" --ylabel \"value\" "
+        "--legend 0 \"raw samples\" "
+    ;
+    debugPlots.OFDMdecoderStdin = popen(OFDMdecoderPlot, "w");
+    if(debugPlots.OFDMtimingSyncStdin == NULL)
+    {
+        fprintf(stderr, "Failed to create OFDM decoder plot: %s\n", strerror(errno));
+        retval = 12;
         goto exit;
     }
 
@@ -1602,13 +1755,14 @@ int main(void)
     //debugPlots.gardnerAlgoEnabled = 1;
     //debugPlots.eyeDiagramRealEnabled = 1;
     //debugPlots.eyeDiagramImaginaryEnabled = 1;
-    debugPlots.OFDMtimingSyncEnabled = 1;
     //debugPlots.channelFilterEnabled = 1;
+    debugPlots.OFDMtimingSyncEnabled = 1;
+    debugPlots.OFDMdecoderEnabled = 1;
 
 
     // while there is data to recieve, not end of file -> right now just a fixed number of 2000
     //for(int audioSampleIndex = 0; audioSampleIndex < SYMBOL_PERIOD * 600; audioSampleIndex++)
-    for(int audioSampleIndex = 0; audioSampleIndex < 44100 * 2; audioSampleIndex++)
+    for(int audioSampleIndex = 0; audioSampleIndex < 44100 * 6; audioSampleIndex++)
     //for(int audioSampleIndex = 0; audioSampleIndex < SYMBOL_PERIOD * 2000; audioSampleIndex++)
     {
         // recieve data on stdin, signed 32bit integer
@@ -1712,6 +1866,11 @@ exit:
     if((debugPlots.channelFilterStdin != NULL) && (fork() == 0))
     {
         pclose(debugPlots.channelFilterStdin);
+        return 0;
+    }
+    if((debugPlots.OFDMdecoderStdin != NULL) && (fork() == 0))
+    {
+        pclose(debugPlots.OFDMdecoderStdin);
         return 0;
     }
 
