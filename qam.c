@@ -15,7 +15,7 @@
 
 #define WARN_UNUSED __attribute__((warn_unused_result))
 
-#define DEBUG_LEVEL 1
+#define DEBUG_LEVEL 0
 #if DEBUG_LEVEL >= 1
     FILE* hexdumpStdIn = NULL;
     FILE* plotStdIn = NULL;
@@ -711,6 +711,8 @@ buffered_data_return_t OFDM(int long n, sample_double_t *outputSample, OFDM_stat
                                     {
                                         if(k % 2 == 0)
                                         //if(k > 16 && k < 100 && k % 2 == 0)
+                                        //if(k > 100 && k < 200 && k % 2 == 0)
+                                        //if(k > 446 && k < 446+200 && k % 2 == 0)
                                         //if(k == OFDMstate->channels / 16)
                                         //if(k == 0)
                                         //if(0)
@@ -723,13 +725,25 @@ buffered_data_return_t OFDM(int long n, sample_double_t *outputSample, OFDM_stat
                                             //OFDMstate->currentOFDMSymbol[k] = 0;
                                             OFDMstate->OFDMsymbol.frequencyDomain[k] = 0;
                                         }
+
+                                        //OFDMstate->OFDMsymbol.frequencyDomain[k] *= (double)OFDMstate->channels / 200 / 30;
+
                                     } else if(OFDMstate->state.symbolIndex == 1)
                                     {
-                                        OFDMstate->OFDMsymbol.frequencyDomain[k] =
-                                            rand() % 2 * 2 - 1 +
-                                            I*(rand() % 2 * 2 - 1);
-                                            //0;
+                                        if(1)
+                                        //if(k > 100 && k < 200 && k % 2 == 0)
+                                        //if(k > 446 && k < 446+10)
+                                        {
+                                            OFDMstate->OFDMsymbol.frequencyDomain[k] =
+                                                rand() % 2 * 2 - 1 +
+                                                I*(rand() % 2 * 2 - 1);
+                                                //0;
+                                        } else {
+                                            OFDMstate->OFDMsymbol.frequencyDomain[k] =
+                                                0;
+                                        }
                                         //OFDMstate->currentOFDMSymbol[k] = 0;    // testing
+                                        //OFDMstate->OFDMsymbol.frequencyDomain[k] *= (double)OFDMstate->channels / 10 / 30;
                                     }
                                 }
                                 // now do the transform
@@ -798,7 +812,7 @@ buffered_data_return_t OFDM(int long n, sample_double_t *outputSample, OFDM_stat
                                 for(int k = 0; k < OFDMstate->channels; k++)
                                 {
                                     //if(1)
-                                    if(k > 446 && k < 446+10)
+                                    if(k > 250 && k < 250+10)
                                     {
                                         //OFDMstate->currentOFDMSymbol[k] = 
                                         OFDMstate->OFDMsymbol.frequencyDomain[k] = 
@@ -811,7 +825,7 @@ buffered_data_return_t OFDM(int long n, sample_double_t *outputSample, OFDM_stat
                                             //I*(rand() % 2); // on off key
                                             //rand() % 3 - 1; // zero sometimes
                                         
-                                        //OFDMstate->OFDMsymbol.frequencyDomain[k] *= (double)OFDMstate->channels / 10 / 2;
+                                        //OFDMstate->OFDMsymbol.frequencyDomain[k] *= (double)OFDMstate->channels / 10 / 30;
 
                                     } else {
                                         OFDMstate->OFDMsymbol.frequencyDomain[k] = 0;
@@ -852,7 +866,7 @@ buffered_data_return_t OFDM(int long n, sample_double_t *outputSample, OFDM_stat
                     }
 
                     // check for exit from DATA field
-                    if(n - OFDMstate->state.fieldStart >= OFDMstate->symbolPeriod * 10 - 1) // set number of symbols of data for example
+                    if(n - OFDMstate->state.fieldStart >= OFDMstate->symbolPeriod * 100 - 1) // set number of symbols of data for example
                     {
                         OFDMstate->state.frame = IDLE;
                         OFDMstate->state.frameStart = n + 1;
@@ -863,7 +877,7 @@ buffered_data_return_t OFDM(int long n, sample_double_t *outputSample, OFDM_stat
     }
 
     //double normalizationFactor = sqrt(OFDMstate->ofdmPeriod);   // normalization factor due to the inverse transform
-    double normalizationFactor = OFDMstate->ofdmPeriod;   // normalization factor due to the inverse transform
+    double normalizationFactor = sqrt(OFDMstate->ofdmPeriod) * 10;   // normalization factor due to the inverse transform
     output /= normalizationFactor;
 
     /*
@@ -1098,7 +1112,7 @@ static int WARN_UNUSED generateSamplesAndOutput(char* filenameInput)
     // audio sample rate
     int sampleRate = 44100;
     // total number of samples to generate
-    long length = sampleRate * 6.5;
+    long length = sampleRate * 60;
     // the number of the current sample
     long n = 0;
 
